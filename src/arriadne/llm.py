@@ -99,11 +99,6 @@ class OpenAIProvider(BaseLLMProvider):
         organization: Optional[str] = None,
         timeout: float = 60.0,
     ):
-        try:
-            import openai
-        except ImportError:
-            raise ImportError("pip install openai")
-
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self._model = model
         self._timeout = timeout
