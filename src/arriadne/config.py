@@ -32,8 +32,8 @@ class AriadneConfig:
     db_path: str | Path = "arriadne.db"
     embedding_dim: int = 384
     faiss_type: str = "auto"
-    ivf_threshold: int = 1000
-    ivf_nlist: int = 256
+    ivf_threshold: int = 50000
+    ivf_nlist: int = 128
     dedup_threshold: float = 0.8
     dedup_num_perm: int = 128
     consolidation_threshold: float = 0.7
