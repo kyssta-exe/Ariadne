@@ -1,6 +1,6 @@
 # Hermes Agent Integration
 
-Ariadne ships as a drop-in memory provider for [Hermes Agent](https://github.com/hermes-agent/hermes-agent). One command to set up, zero configuration required.
+Ariadne ships as a drop-in memory provider for [Hermes Agent](https://hermes-agent.nousresearch.com/). One command to set up, zero configuration required.
 
 ## One-Command Setup
 
