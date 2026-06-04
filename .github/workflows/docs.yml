@@ -3,12 +3,12 @@ name: Deploy Docs to Vercel
 on:
   push:
     paths:
-      - 'docs/**'          # Trigger only when docs change
+      - 'docs/**'
       - '.github/workflows/docs.yml'
       - 'package.json'
     branches:
       - main
-  workflow_dispatch:        # Also allow manual trigger
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -24,8 +24,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '22'
 
       - name: Install dependencies
         run: npm ci
@@ -35,11 +34,17 @@ jobs:
 
       - name: Deploy to Vercel
         id: deploy
-        uses: amondnet/vercel-action@v25
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prod'
-          working-directory: ./
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm i -g vercel@latest
+          
+          DEPLOY_URL=$(vercel deploy --prod \
+            --token="${{ secrets.VERCEL_TOKEN }}" \
+            --yes \
+            --cwd=. \
+            2>&1 | grep -oP 'https://[^\s]+' | head -1)
+          
+          echo "url=$DEPLOY_URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: $DEPLOY_URL"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
