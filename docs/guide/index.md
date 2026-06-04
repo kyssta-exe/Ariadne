@@ -6,6 +6,10 @@ description: "Ariadne is a local memory system for AI agents. 238us vector searc
 
 **Ariadne** is a memory system for AI agents. Named after the Greek goddess who gave Theseus the thread to navigate the Labyrinth, Ariadne gives your AI agent the thread to navigate its own memories.
 
+::: warning Public Testing Phase
+Ariadne is in **public testing**. It's built, tested, and the benchmarks are real — but it hasn't been battle-tested in production at scale by a wide community. If you're running serious business-critical systems, you might want to wait. But giving it a try? The numbers speak for themselves. We'd love your feedback.
+:::
+
 ## Why Ariadne?
 
 Current AI memory systems force you to choose between:

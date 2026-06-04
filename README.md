@@ -9,6 +9,10 @@ Memory for AI agents. Sub-millisecond search. Zero infrastructure.
 
 ---
 
+> ⚠️ **Public Testing Phase** — Ariadne works and the benchmarks are real, but it hasn't been battle-tested in production at scale by a wide community. If you're running serious business-critical systems, you might want to wait. Giving it a try though? The numbers speak for themselves. We'd love your feedback.
+
+---
+
 ## Quick Start
 
 ```python

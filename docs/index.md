@@ -64,6 +64,10 @@ results = memory.recall("server specs", k=5)
 
 </div>
 
+::: warning Public Testing Phase
+Ariadne is **public testing software**. It's built, tested, and benchmarks well — but it hasn't been battle-tested in production at scale by a wide community. If you're running serious business-critical systems, you might want to wait. But giving it a try? The benchmarks speak for themselves. We'd love your feedback.
+:::
+
 <div class="hero-install">
 
 ```bash
