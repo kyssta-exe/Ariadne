@@ -40,6 +40,34 @@ Most settings have sensible defaults. The only required parameter is `db_path`.
 | `eviction_budget` | 100000 | Max memories before eviction kicks in |
 | `soft_delete_days` | 7 | Grace period before hard delete |
 
+## Server Configuration
+
+When using the REST API server, additional settings apply:
+
+```python
+from arriadne.server import start_server
+
+start_server(
+    mem,
+    host="0.0.0.0",    # Listen address
+    port=8420,          # Listen port
+    api_key=None,       # Optional API key for auth
+)
+```
+
+### Server Environment Variables
+
+```bash
+ARIADNE_HOST=0.0.0.0          # Server listen address
+ARIADNE_PORT=8420             # Server listen port
+ARIADNE_API_KEY=your-key      # API key (optional, enables auth)
+```
+
+When `ARIADNE_API_KEY` is set, all requests must include:
+```
+Authorization: Bearer your-key
+```
+
 ## Environment Variables
 
 ```bash

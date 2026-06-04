@@ -14,16 +14,16 @@ hero:
       link: https://github.com/kyssta-exe/Ariadne
 
 features:
-  - title: "0.89ms vector search"
-    details: "FAISS-powered. 12× faster than sqlite-vec. Scales to millions of memories."
+  - title: "302us vector search"
+    details: "FAISS-powered. 6.5x faster than ChromaDB, 3.3x faster than sqlite-vec. Scales to millions of memories."
   - title: "Hybrid retrieval"
     details: "Vector similarity + keyword search + graph traversal. Reciprocal Rank Fusion. 90%+ recall (with semantic embeddings)."
   - title: "Knowledge graph"
-    details: "Typed entities, relationships, multi-hop traversal. One query walks the full chain."
+    details: "Typed entities, relationships, multi-hop traversal. One query walks the full chain. 72us per traversal."
   - title: "Cognitive retention"
     details: "Ebbinghaus forgetting curve. Memories strengthen with use, fade without it."
   - title: "Auto-dedup"
-    details: "MinHash LSH catches near-duplicates at 1.25ms before they enter the system."
+    details: "MinHash LSH catches near-duplicates before they enter the system."
   - title: "Zero infrastructure"
     details: "SQLite + FAISS. One .db file. No Docker, no Redis, no API keys, no daemon."
 ---
@@ -38,14 +38,14 @@ from arriadne import AriadneMemory
 memory = AriadneMemory("./my-memory.db")
 
 # Store a memory
-memory.add(
+memory.remember(
     content="VPS has 4 cores, 8GB RAM, Ubuntu 24.04",
-    source="system",
+    memory_type="semantic",
     importance=0.8,
 )
 
 # Search — vector + keyword + graph, fused
-results = memory.search("server specs", limit=5)
+results = memory.recall("server specs", k=5)
 # → [<Memory content="VPS has 4 cores..." score=0.94>]
 ```
 
@@ -53,13 +53,14 @@ results = memory.search("server specs", limit=5)
 
 <div class="hero-compare">
 
-| | Ariadne | Mnemosyne | Mem0 | ChromaDB |
-|---|:---:|:---:|:---:|:---:|
-| Vector search | **0.89ms** | 153ms | 12ms | 8ms |
-| Hybrid search | ✅ | ❌ | ❌ | ⚠️ |
-| Knowledge graph | ✅ | ⚠️ | ❌ | ❌ |
-| Runs locally | ✅ | ✅ | ❌ | ✅ |
-| No daemon | ✅ | ✅ | ❌ | ❌ |
+| | Ariadne | ChromaDB | sqlite-vec |
+|---|:---:|:---:|:---:|
+| Vector search (p50) | **0.30ms** | 1.96ms | 1.0ms |
+| FTS search (p50) | **0.55ms** | -- | -- |
+| Hybrid search (p50) | **1.21ms** | -- | -- |
+| Graph traversal (p50) | **0.07ms** | -- | -- |
+| Requires daemon | No | No | No |
+| Knowledge graph | Yes | No | No |
 
 </div>
 

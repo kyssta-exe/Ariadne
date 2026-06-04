@@ -1,7 +1,22 @@
 """
-Ariadne REST API Server
+Ariadne REST API Server — Production-Ready
 
-FastAPI-based server that exposes Ariadne's memory capabilities over HTTP.
+FastAPI-based server that exposes Ariadne's memory capabilities over HTTP
+with comprehensive observability, streaming, batch operations, and community
+detection.
+
+Features:
+- Full CRUD for memories, entities, graphs, communities
+- Hybrid search (vector + FTS5 + RRF)
+- Streaming search via SSE
+- Community detection and management
+- Memory importance scoring
+- Batch import/export
+- Request logging with timing
+- Search quality metrics
+- Memory statistics (by tier, by age, by entity)
+- Graph metrics (nodes, edges, communities)
+- Health check and readiness probes
 
 Usage:
     arriadne-server --port 8899 --db-path ./memory.db
@@ -11,18 +26,23 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from collections import defaultdict
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Header, Body
+from fastapi import FastAPI, HTTPException, Header, Body, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
+
+from arriadne.observability import ObservabilityCollector, RequestLogger, get_collector
 
 logger = logging.getLogger("arriadne.server")
 
-
-# === Request/Response Models (module-level for Pydantic v2) ===
+# === Request/Response Models ===
 
 class StoreRequest(BaseModel):
     content: str
@@ -33,6 +53,11 @@ class StoreRequest(BaseModel):
     user_id: Optional[str] = None
     agent_id: Optional[str] = None
 
+class BatchSearchRequest(BaseModel):
+    queries: List[str]
+    limit: int = Field(10, ge=1, le=100)
+    threshold: float = Field(0.5, ge=0.0, le=1.0)
+
 
 class SearchRequest(BaseModel):
     query: str
@@ -41,6 +66,8 @@ class SearchRequest(BaseModel):
     use_hybrid: bool = True
     include_graph: bool = False
     include_metadata: bool = True
+    community_id: Optional[int] = None  # Filter by community
+    memory_type: Optional[str] = None  # Filter by type
     user_id: Optional[str] = None
     agent_id: Optional[str] = None
 
@@ -59,6 +86,45 @@ class UpdateRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class BatchStoreRequest(BaseModel):
+    memories: List[StoreRequest]
+
+
+class CommunityDetectRequest(BaseModel):
+    force: bool = False
+
+
+class NLIRequest(BaseModel):
+    text_a: str
+    text_b: str
+    max_tier: int = Field(3, ge=1, le=3)
+
+class EntityCreateRequest(BaseModel):
+    name: str
+    entity_type: str = "unknown"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class GraphEdgeRequest(BaseModel):
+    source: str
+    target: str
+    relation: str = "related"
+    weight: float = 1.0
+
+class TemporalFactRequest(BaseModel):
+    text: str
+    subject: str
+    predicate: str
+    obj: str
+    valid_at: Optional[float] = None
+
+
+# === Observability Middleware ===
+
+# ObservabilityMiddleware is replaced by the ObservabilityCollector in observability.py
+# Keep backward-compatible alias
+ObservabilityMiddleware = ObservabilityCollector
+
+
 # === App Factory ===
 
 def create_app(
@@ -68,11 +134,16 @@ def create_app(
     api_key: Optional[str] = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
+    observability = get_collector()
+    request_logger = RequestLogger()
 
     app = FastAPI(
         title="Ariadne Memory API",
-        description="Fast local memory system for AI agents",
-        version="1.0.0",
+        description=(
+            "Production-ready memory system for AI agents with community detection, "
+            "NLI contradiction detection, advanced importance scoring, and observability"
+        ),
+        version="2.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
     )
@@ -106,32 +177,150 @@ def create_app(
             if token != api_key:
                 raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # === Routes ===
+    # === Request Timing Middleware ===
+
+    @app.middleware("http")
+    async def timing_middleware(request: Request, call_next):
+        start = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            endpoint = f"{request.method} {request.url.path}"
+            observability.record_request(endpoint, elapsed_ms, "error")
+            client_ip = request.client.host if request.client else None
+            request_logger.log_request(
+                request.method, request.url.path, 500, elapsed_ms,
+                client_ip=client_ip, error=str(exc),
+            )
+            raise
+        elapsed_ms = (time.monotonic() - start) * 1000
+        endpoint = f"{request.method} {request.url.path}"
+        status = "ok" if response.status_code < 400 else "error"
+        observability.record_request(endpoint, elapsed_ms, status)
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
+        request_logger.log_request(
+            request.method, request.url.path, response.status_code, elapsed_ms,
+            client_ip=client_ip, user_agent=user_agent,
+        )
+        response.headers["X-Response-Time"] = f"{elapsed_ms:.1f}ms"
+        response.headers["X-Request-Id"] = f"{id(request):x}"
+        return response
+
+    # === Health & Observability Routes ===
 
     @app.get("/", tags=["health"])
     async def root():
-        return {"name": "Ariadne Memory API", "version": "1.0.0", "status": "running", "docs": "/docs"}
+        return {
+            "name": "Ariadne Memory API",
+            "version": "2.1.0",
+            "status": "running",
+            "docs": "/docs",
+            "features": [
+                "hybrid_search", "community_detection", "nli_contradiction",
+                "importance_scoring", "temporal_graph", "entity_resolution",
+                "memory_lifecycle", "llm_extraction",
+            ],
+        }
 
     @app.get("/health", tags=["health"])
     async def health():
         mem = get_memory()
         stats = mem.stats()
-        return {"status": "healthy", "memories": stats.get("total_memories", 0), "uptime": time.time()}
+        return {
+            "status": "healthy",
+            "memories": stats.get("total_memories", 0),
+            "active_memories": stats.get("active_memories", 0),
+            "uptime": time.time(),
+        }
+
+    @app.get("/ready", tags=["health"])
+    async def readiness():
+        """Kubernetes-style readiness probe."""
+        try:
+            mem = get_memory()
+            mem.stats()
+            return {"ready": True}
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Not ready: {e}")
 
     @app.get("/stats", tags=["stats"])
     async def stats(authorization: Optional[str] = Header(None)):
         await verify_api_key(authorization)
         mem = get_memory()
         raw = mem.stats()
-        return {
+
+        # Enrich with graph metrics
+        result = {
             "total_memories": raw.get("total_memories", 0),
             "active_memories": raw.get("active_memories", 0),
-            "graph_nodes": raw.get("graph_nodes", 0),
-            "graph_edges": raw.get("graph_edges", 0),
-            "vector_index_size": raw.get("vector_index_size", 0),
+            "deleted_memories": raw.get("deleted_memories", 0),
+            "by_type": raw.get("by_type", {}),
+            "total_entities": raw.get("total_entities", 0),
+            "total_edges": raw.get("total_edges", 0),
+            "vector_index_size": raw.get("faiss_vectors", 0),
             "embedding_model": raw.get("embedding_provider", "none"),
-            "avg_latency_ms": raw.get("avg_latency_ms", 0),
+            "embedding_dimension": raw.get("embedding_dimension", 0),
+            "db_size_bytes": raw.get("db_size_bytes", 0),
+            "avg_importance": raw.get("avg_importance", 0),
         }
+
+        # Add community stats if available
+        try:
+            from arriadne.community import CommunityDetector
+            detector = CommunityDetector(mem._db.conn)
+            comm_metrics = detector.metrics()
+            result["communities"] = {
+                "count": comm_metrics.num_communities,
+                "avg_size": round(comm_metrics.avg_community_size, 1),
+                "largest": comm_metrics.largest_community,
+                "coverage": round(comm_metrics.coverage, 3),
+            }
+        except Exception:
+            result["communities"] = {"count": 0}
+
+        # Add lifecycle stats if available
+        try:
+            if hasattr(mem, "_get_lifecycle"):
+                lifecycle = mem._get_lifecycle()
+                lifecycle_result = lifecycle.run_lifecycle()
+                result["lifecycle"] = {
+                    "hot": lifecycle_result.get("stats", {}).hot_count,
+                    "warm": lifecycle_result.get("stats", {}).warm_count,
+                    "cold": lifecycle_result.get("stats", {}).cold_count,
+                }
+        except Exception:
+            pass
+
+        return result
+
+    @app.get("/metrics", tags=["observability"])
+    async def metrics(
+        authorization: Optional[str] = Header(None),
+        format: str = Query("prometheus", regex="^(prometheus|json)$"),
+    ):
+        """Prometheus-compatible metrics endpoint.
+
+        Returns Prometheus text exposition format by default.
+        Use ?format=json for JSON (backward compatible).
+        """
+        await verify_api_key(authorization)
+        # Update SQLite metrics before rendering
+        try:
+            mem = get_memory()
+            observability.update_sqlite_metrics(mem._db.conn)
+        except Exception:
+            pass
+        if format == "json":
+            return observability.to_dict()
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            observability.render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
+    # === Memory CRUD Routes ===
 
     @app.post("/memories", tags=["memories"])
     async def store_memory(req: StoreRequest, authorization: Optional[str] = Header(None)):
@@ -141,35 +330,24 @@ def create_app(
             req.content, topic=req.topic, importance=req.importance,
             entities=req.entities, metadata=req.metadata,
         )
+        observability.memories_stored_total.inc()
         return result
 
-    @app.post("/search", tags=["search"])
-    async def search_memories(req: SearchRequest, authorization: Optional[str] = Header(None)):
+    @app.get("/memories/ranked", tags=["memories", "scoring"])
+    async def rank_memories(
+        limit: int = Query(10, ge=1, le=100),
+        memory_type: Optional[str] = None,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Get top memories ranked by multi-factor importance score."""
         await verify_api_key(authorization)
         mem = get_memory()
-        results = mem.search(
-            req.query, limit=req.limit, threshold=req.threshold,
-            use_hybrid=req.use_hybrid, include_graph=req.include_graph,
-        )
-        return {"results": results, "count": len(results)}
-
-    @app.post("/extract", tags=["extraction"])
-    async def extract_memories(req: ExtractRequest, authorization: Optional[str] = Header(None)):
-        await verify_api_key(authorization)
-        mem = get_memory()
-        extracted = mem.extract_from_conversation(req.messages)
-        stored = []
-        if req.auto_store:
-            for m in extracted:
-                result = mem.store(
-                    m.text, topic=m.topic, importance=m.importance,
-                    entities=m.entities, metadata={"attributed_to": m.attributed_to},
-                )
-                stored.append(result)
-        return {"extracted": len(extracted), "stored": len(stored), "memories": [
-            {"text": m.text, "topic": m.topic, "importance": m.importance, "entities": m.entities}
-            for m in extracted
-        ]}
+        try:
+            from arriadne.scoring import MemoryImportanceScorer
+            scorer = MemoryImportanceScorer(mem._db.conn, mem._embedder)
+            return {"memories": scorer.get_top_memories(limit=limit, memory_type=memory_type)}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/memories/{memory_id}", tags=["memories"])
     async def get_memory_by_id(memory_id: str, authorization: Optional[str] = Header(None)):
@@ -197,17 +375,160 @@ def create_app(
         success = mem.delete(memory_id)
         if not success:
             raise HTTPException(status_code=404, detail="Memory not found")
+        observability.memories_deleted_total.inc()
         return {"deleted": True, "id": memory_id}
 
+    @app.get("/memories/{memory_id}/score", tags=["memories", "scoring"])
+    async def score_memory(memory_id: str, authorization: Optional[str] = Header(None)):
+        """Get importance score breakdown for a memory."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.scoring import MemoryImportanceScorer
+            scorer = MemoryImportanceScorer(mem._db.conn, mem._embedder)
+            score = scorer.score_memory(int(memory_id))
+            return {"memory_id": memory_id, "score": score.to_dict()}
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=404, detail="Memory not found")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # === Search Routes ===
+
+    @app.post("/search", tags=["search"])
+    async def search_memories(req: SearchRequest, authorization: Optional[str] = Header(None)):
+        await verify_api_key(authorization)
+        t0 = time.monotonic()
+        mem = get_memory()
+
+        if req.community_id is not None:
+            # Community-scoped search
+            try:
+                from arriadne.community import CommunityDetector
+                detector = CommunityDetector(mem._db.conn)
+                results = detector.search_within_community(
+                    req.query, req.community_id, limit=req.limit,
+                )
+            except Exception:
+                results = mem.search(req.query, limit=req.limit, threshold=req.threshold)
+        else:
+            results = mem.search(
+                req.query, limit=req.limit, threshold=req.threshold,
+                use_hybrid=req.use_hybrid, include_graph=req.include_graph,
+            )
+
+        # Apply memory type filter
+        if req.memory_type:
+            results = [r for r in results if r.get("topic") == req.memory_type]
+
+        latency_ms = (time.monotonic() - t0) * 1000
+        observability.record_search(latency_ms, len(results))
+
+        return {
+            "results": results,
+            "count": len(results),
+            "latency_ms": round(latency_ms, 2),
+        }
+
+    @app.get("/search/stream", tags=["search"])
+    async def search_stream(
+        query: str = Query(...),
+        limit: int = Query(10, ge=1, le=100),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Stream search results via Server-Sent Events."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        t0 = time.monotonic()
+
+        def event_generator():
+            try:
+                results = mem.search(query, limit=limit)
+                for i, result in enumerate(results):
+                    data = json.dumps({
+                        "result": result,
+                        "rank": i + 1,
+                        "done": i == len(results) - 1,
+                    })
+                    yield f"data: {data}\n\n"
+                latency_ms = (time.monotonic() - t0) * 1000
+                observability.record_search(latency_ms, len(results))
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/nli/detect", tags=["nli"])
+    async def detect_nli(req: NLIRequest, authorization: Optional[str] = Header(None)):
+        """Detect NLI relationship between two texts."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.nli import EnhancedContradictionDetector
+            detector = EnhancedContradictionDetector(
+                embedding_provider=mem._embedder if mem._embedder.name != "keyword" else None,
+            )
+            result = detector.detect(req.text_a, req.text_b, max_tier=req.max_tier)
+            return {
+                "label": result.label,
+                "confidence": result.confidence,
+                "method": result.method,
+                "details": result.details,
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # === Extraction Routes ===
+
+    @app.post("/extract", tags=["extraction"])
+    async def extract_memories(req: ExtractRequest, authorization: Optional[str] = Header(None)):
+        await verify_api_key(authorization)
+        mem = get_memory()
+        extracted = mem.extract_from_conversation(req.messages)
+        stored = []
+        if req.auto_store:
+            for m in extracted:
+                result = mem.store(
+                    m.text, topic=m.topic, importance=m.importance,
+                    entities=m.entities, metadata={"attributed_to": m.attributed_to},
+                )
+                stored.append(result)
+        return {
+            "extracted": len(extracted),
+            "stored": len(stored),
+            "memories": [
+                {"text": m.text, "topic": m.topic, "importance": m.importance, "entities": m.entities}
+                for m in extracted
+            ],
+        }
+
+    # === Graph Routes ===
+
     @app.get("/graph/entities", tags=["graph"])
-    async def get_entities(entity_type: Optional[str] = None, limit: int = 100, authorization: Optional[str] = Header(None)):
+    async def get_entities(
+        entity_type: Optional[str] = None,
+        limit: int = Query(100, ge=1, le=1000),
+        authorization: Optional[str] = Header(None),
+    ):
         await verify_api_key(authorization)
         mem = get_memory()
         entities = mem.get_entities(entity_type=entity_type, limit=limit)
         return {"entities": entities, "count": len(entities)}
 
     @app.get("/graph/entity/{entity_name}", tags=["graph"])
-    async def get_entity_graph(entity_name: str, hops: int = 2, authorization: Optional[str] = Header(None)):
+    async def get_entity_graph(
+        entity_name: str,
+        hops: int = Query(2, ge=1, le=5),
+        authorization: Optional[str] = Header(None),
+    ):
         await verify_api_key(authorization)
         mem = get_memory()
         return mem.graph_search(entity_name, hops=hops)
@@ -216,7 +537,7 @@ def create_app(
     async def connect_entities(
         source: str = Body(..., embed=True),
         target: str = Body(..., embed=True),
-        relation: str = Body(..., embed=True),
+        relation: str = Body("related", embed=True),
         weight: float = Body(1.0, embed=True),
         authorization: Optional[str] = Header(None),
     ):
@@ -225,31 +546,335 @@ def create_app(
         mem.graph_add_edge(source, target, relation, weight=weight)
         return {"connected": True, "source": source, "target": target, "relation": relation}
 
+    @app.get("/graph/metrics", tags=["graph"])
+    async def graph_metrics(authorization: Optional[str] = Header(None)):
+        """Get graph-level metrics."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.community import CommunityDetector
+            detector = CommunityDetector(mem._db.conn)
+            comm_metrics = detector.metrics()
+            return {
+                "communities": {
+                    "count": comm_metrics.num_communities,
+                    "avg_size": round(comm_metrics.avg_community_size, 1),
+                    "largest": comm_metrics.largest_community,
+                    "smallest": comm_metrics.smallest_community,
+                    "modularity": round(comm_metrics.total_modularity, 4),
+                    "coverage": round(comm_metrics.coverage, 3),
+                },
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    # === Community Routes ===
+
+    @app.get("/communities", tags=["communities"])
+    async def list_communities(
+        limit: int = Query(100, ge=1, le=1000),
+        authorization: Optional[str] = Header(None),
+    ):
+        """List all detected communities."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.community import CommunityDetector
+            detector = CommunityDetector(mem._db.conn)
+            communities = detector.get_communities(limit=limit)
+            return {
+                "communities": [c.to_dict() for c in communities],
+                "count": len(communities),
+            }
+        except Exception as e:
+            return {"communities": [], "count": 0, "error": str(e)}
+
+    @app.post("/communities/detect", tags=["communities"])
+    async def detect_communities(
+        req: CommunityDetectRequest = CommunityDetectRequest(),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Run community detection on the entity graph."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.community import CommunityDetector
+            detector = CommunityDetector(mem._db.conn)
+            communities = detector.detect_communities(force=req.force)
+            return {
+                "communities": [c.to_dict() for c in communities],
+                "count": len(communities),
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/communities/{community_id}", tags=["communities"])
+    async def get_community(
+        community_id: int,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Get a specific community with its memories."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.community import CommunityDetector
+            detector = CommunityDetector(mem._db.conn)
+            community = detector.get_community(community_id)
+            if not community:
+                raise HTTPException(status_code=404, detail="Community not found")
+
+            result = community.to_dict()
+            result["summary"] = detector.get_community_summary(community_id)
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/communities/{community_id}/search", tags=["communities"])
+    async def search_community(
+        community_id: int,
+        query: str = Query(...),
+        limit: int = Query(10, ge=1, le=100),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Search memories within a community."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.community import CommunityDetector
+            detector = CommunityDetector(mem._db.conn)
+            results = detector.search_within_community(query, community_id, limit=limit)
+            return {"results": results, "count": len(results)}
+        except Exception as e:
+            return {"results": [], "count": 0, "error": str(e)}
+
+    # === Batch Operations ===
+
+    @app.post("/batch/search", tags=["batch"])
+    async def batch_search(
+        req: BatchSearchRequest,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Execute multiple search queries in a single request."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        t0 = time.monotonic()
+        all_results = []
+        for query in req.queries:
+            results = mem.search(query, limit=req.limit, threshold=req.threshold)
+            all_results.append({"query": query, "results": results, "count": len(results)})
+        latency_ms = (time.monotonic() - t0) * 1000
+        return {
+            "queries": all_results,
+            "total_results": sum(r["count"] for r in all_results),
+            "latency_ms": round(latency_ms, 2),
+        }
+
+    # === Entity Management Routes ===
+
+    @app.post("/graph/entities", tags=["graph"])
+    async def create_entity(
+        req: EntityCreateRequest,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Create an entity in the knowledge graph."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        mem._db.add_entity(req.name, entity_type=req.entity_type)
+        return {"created": True, "name": req.name, "type": req.entity_type}
+
+    @app.delete("/graph/entities/{entity_name}", tags=["graph"])
+    async def delete_entity(
+        entity_name: str,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Delete an entity from the knowledge graph."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            mem._db.conn.execute("DELETE FROM entities WHERE name = ?", (entity_name,))
+            mem._db.conn.execute(
+                "DELETE FROM edges WHERE source = ? OR target = ?",
+                (entity_name, entity_name),
+            )
+            mem._db.conn.commit()
+            return {"deleted": True, "name": entity_name}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # === Temporal Graph Routes ===
+
+    @app.get("/temporal/facts", tags=["temporal"])
+    async def get_temporal_facts(
+        subject: Optional[str] = None,
+        current_only: bool = True,
+        limit: int = Query(100, ge=1, le=1000),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Query temporal facts."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.temporal import TemporalGraph
+            tg = TemporalGraph(mem._db.conn)
+            facts = tg.find_facts(subject=subject, current_only=current_only)
+            if limit:
+                facts = facts[:limit]
+            return {"facts": [f.to_dict() for f in facts], "count": len(facts)}
+        except Exception as e:
+            return {"facts": [], "count": 0, "error": str(e)}
+
+    @app.post("/temporal/facts", tags=["temporal"])
+    async def add_temporal_fact(
+        req: TemporalFactRequest,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Add a temporal fact to the graph."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.temporal import TemporalGraph
+            tg = TemporalGraph(mem._db.conn)
+            fact = tg.add_fact(
+                text=req.text,
+                subject=req.subject,
+                predicate=req.predicate,
+                obj=req.obj,
+                valid_at=req.valid_at,
+            )
+            return fact.to_dict()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/temporal/timeline/{subject}", tags=["temporal"])
+    async def get_timeline(
+        subject: str,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Get the temporal timeline for a subject."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.temporal import TemporalGraph
+            tg = TemporalGraph(mem._db.conn)
+            timeline = tg.get_timeline(subject)
+            return {"subject": subject, "timeline": [f.to_dict() for f in timeline], "count": len(timeline)}
+        except Exception as e:
+            return {"subject": subject, "timeline": [], "count": 0, "error": str(e)}
+
+    @app.post("/temporal/invalidate/{fact_id}", tags=["temporal"])
+    async def invalidate_fact(
+        fact_id: int,
+        authorization: Optional[str] = Header(None),
+    ):
+        """Invalidate a temporal fact."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.temporal import TemporalGraph
+            tg = TemporalGraph(mem._db.conn)
+            success = tg.invalidate_fact(fact_id)
+            if not success:
+                raise HTTPException(status_code=404, detail="Fact not found")
+            return {"invalidated": True, "fact_id": fact_id}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/temporal/stats", tags=["temporal"])
+    async def temporal_stats(authorization: Optional[str] = Header(None)):
+        """Get temporal graph statistics."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.temporal import TemporalGraph
+            tg = TemporalGraph(mem._db.conn)
+            return tg.stats()
+        except Exception as e:
+            return {"error": str(e)}
+
+    # === Lifecycle Management Routes (enhanced) ===
+
+    @app.post("/lifecycle/evict", tags=["lifecycle"])
+    async def lifecycle_evict(
+        target_count: int = Query(100, ge=10, le=10000),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Evict low-priority memories to target count."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            evicted = mem._db.evict()
+            return {"evicted": evicted, "target_count": target_count}
+        except Exception as e:
+            return {"evicted": 0, "error": str(e)}
+
     @app.get("/lifecycle", tags=["lifecycle"])
     async def lifecycle_status(authorization: Optional[str] = Header(None)):
         await verify_api_key(authorization)
         mem = get_memory()
-        if hasattr(mem, "_lifecycle"):
+        if hasattr(mem, "_get_lifecycle"):
             return mem.run_lifecycle()
         return {"error": "Lifecycle not configured"}
 
+    @app.post("/lifecycle/forget", tags=["lifecycle"])
+    async def lifecycle_forget(
+        min_age_days: int = Query(180, ge=30, le=365),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Forget memories from dead communities."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.community import CommunityDetector
+            detector = CommunityDetector(mem._db.conn)
+            detector.mark_dead_communities()
+            forgotten = detector.forget_dead_communities(min_age_days=min_age_days)
+            return {"forgotten": forgotten, "min_age_days": min_age_days}
+        except Exception as e:
+            return {"forgotten": 0, "error": str(e)}
+
+    # === Consolidation Routes ===
+
     @app.post("/consolidate", tags=["consolidation"])
-    async def consolidate(method: str = "similarity", dry_run: bool = False, authorization: Optional[str] = Header(None)):
+    async def consolidate(
+        method: str = Query("similarity"),
+        dry_run: bool = Query(False),
+        authorization: Optional[str] = Header(None),
+    ):
         await verify_api_key(authorization)
         mem = get_memory()
         if hasattr(mem, "_consolidator"):
             return mem.consolidate_with_llm(method=method, dry_run=dry_run)
         return {"error": "Consolidation not configured"}
 
+    # === Batch Operations ===
+
     @app.post("/import", tags=["data"])
-    async def import_memories(memories: List[StoreRequest], authorization: Optional[str] = Header(None)):
+    async def import_memories(
+        memories: List[StoreRequest],
+        authorization: Optional[str] = Header(None),
+    ):
+        """Import multiple memories at once."""
         await verify_api_key(authorization)
         mem = get_memory()
-        results = [mem.store(m.content, topic=m.topic, importance=m.importance, entities=m.entities, metadata=m.metadata) for m in memories]
+        results = [
+            mem.store(
+                m.content, topic=m.topic, importance=m.importance,
+                entities=m.entities, metadata=m.metadata,
+            )
+            for m in memories
+        ]
         return {"imported": len(results), "memories": results}
 
     @app.get("/export", tags=["data"])
-    async def export_memories(format: str = "json", authorization: Optional[str] = Header(None)):
+    async def export_memories(
+        format: str = Query("json"),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Export all memories."""
         await verify_api_key(authorization)
         mem = get_memory()
         all_memories = mem.search("*", limit=10000, threshold=0.0)

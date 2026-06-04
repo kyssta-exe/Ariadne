@@ -158,7 +158,7 @@ class AriadneDB:
             return
         db_path = str(self._config.db_path)
         logger.info("Opening database at %s", db_path)
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(f"PRAGMA wal_autocheckpoint={self._config.wal_autocheckpoint}")

@@ -10,7 +10,7 @@ export default defineConfig({
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'Ariadne' }],
     ['meta', { property: 'og:title', content: 'Ariadne — Memory for AI Agents' }],
-    ['meta', { property: 'og:description', content: 'Sub-millisecond hybrid search. Cognitive retention. Knowledge graph traversal. Zero infrastructure. One pip install.' }],
+    ['meta', { property: 'og:description', content: '302us vector search. Hybrid retrieval. Knowledge graph. Zero infrastructure. One pip install.' }],
     ['meta', { property: 'og:url', content: 'https://ariadne.mantes.net' }],
     ['meta', { property: 'og:image', content: 'https://ariadne.mantes.net/og-image.png' }],
     ['meta', { property: 'og:image:width', content: '1200' }],
@@ -19,14 +19,11 @@ export default defineConfig({
     // Twitter Card
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
     ['meta', { name: 'twitter:title', content: 'Ariadne — Memory for AI Agents' }],
-    ['meta', { name: 'twitter:description', content: 'Sub-millisecond hybrid search. Cognitive retention. Knowledge graph. Zero infrastructure.' }],
+    ['meta', { name: 'twitter:description', content: '302us vector search. Hybrid retrieval. Knowledge graph. Zero infrastructure.' }],
     ['meta', { name: 'twitter:image', content: 'https://ariadne.mantes.net/og-image.png' }],
 
     // Canonical
     ['link', { rel: 'canonical', href: 'https://ariadne.mantes.net' }],
-
-    // Google Search Console (replace with your actual code)
-    // ['meta', { name: 'google-site-verification', content: 'YOUR_CODE_HERE' }],
 
     // Geo meta
     ['meta', { name: 'robots', content: 'index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1' }],
@@ -70,6 +67,15 @@ export default defineConfig({
           { text: 'Architecture', link: '/guide/architecture' },
           { text: 'Embeddings', link: '/guide/embeddings' },
           { text: 'Migration', link: '/guide/migration' },
+          { text: 'REST API', link: '/guide/rest-api' },
+          { text: 'Observability', link: '/guide/observability' },
+        ],
+      },
+      {
+        text: 'Reference',
+        items: [
+          { text: 'Competitive Comparison', link: '/guide/comparison' },
+          { text: 'Benchmarks', link: '/guide/benchmarks' },
         ],
       },
       {

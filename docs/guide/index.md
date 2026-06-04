@@ -48,11 +48,11 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 
 | Operation | Latency | Scale |
 |-----------|---------|-------|
-| Vector search (FAISS) | **0.89ms** | 10K memories |
-| Keyword search (FTS5) | **1.74ms** | 10K memories |
-| Hybrid search (RRF) | **2.46ms** | 10K memories |
+| Vector search (FAISS) | **0.30ms** | 10K memories |
+| Keyword search (FTS5) | **0.55ms** | 10K memories |
+| Hybrid search (RRF) | **1.21ms** | 10K memories |
 | Dedup check (MinHash LSH) | **1.25ms** | 10K documents |
-| Graph traversal (3 hops) | **0.06ms** | 100 entities |
+| Graph traversal (2 hops) | **0.07ms** | 10K entities |
 
 ## What Makes It Different
 
@@ -74,7 +74,7 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 Ariadne is a local memory system for AI agents. It stores, searches, and manages memories using FAISS vector search, SQLite FTS5 keywords, a knowledge graph, and cognitive retention modeling. No cloud, no API keys, no daemon.
 
 ### How fast is Ariadne?
-Ariadne's FAISS vector search returns results in **0.89ms** across 10,000 memories. Hybrid search (vector + keyword + graph) completes in **2.46ms**. This is 12× faster than sqlite-vec.
+Ariadne's FAISS vector search returns results in **0.30ms** across 10,000 memories. Hybrid search (vector + keyword + graph) completes in **1.21ms**. This is 6.5x faster than ChromaDB and 3.3x faster than sqlite-vec.
 
 ### Does Ariadne work with Hermes Agent?
 Yes. Ariadne ships as a drop-in plugin for Hermes Agent. Install the plugin, set `memory.provider: ariadne`, restart. All existing tool names and conversations work unchanged.

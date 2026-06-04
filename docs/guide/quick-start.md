@@ -81,6 +81,43 @@ print(f"Active: {stats['active_memories']}, Graph: {stats['total_entities']} ent
 mem.close()
 ```
 
+## REST API
+
+Start the built-in HTTP server:
+
+```python
+from arriadne import AriadneMemory
+from arriadne.server import start_server
+
+mem = AriadneMemory(db_path="memory.db")
+start_server(mem, port=8420)
+```
+
+Or via CLI:
+
+```bash
+ariadne serve --db-path memory.db --port 8420
+```
+
+Then use standard HTTP:
+
+```bash
+# Store a memory
+curl -X POST http://localhost:8420/remember \
+  -H "Content-Type: application/json" \
+  -d '{"content": "User prefers dark mode", "memory_type": "semantic", "importance": 0.8}'
+
+# Search
+curl -X POST http://localhost:8420/recall \
+  -H "Content-Type: application/json" \
+  -d '{"query": "dark mode", "k": 5}'
+
+# Health check
+curl http://localhost:8420/health
+```
+
+See the full [REST API reference](/guide/rest-api) for all endpoints.
+
 ## CLI Usage
 
 Prefer the terminal?
@@ -95,6 +132,9 @@ ariadne add "Deploy with make deploy-prod" --type procedural --importance 0.9
 
 # Search
 ariadne search "deploy" -k 5
+
+# Start REST server
+ariadne serve --port 8420
 
 # Stats
 ariadne stats
@@ -111,11 +151,13 @@ ariadne stats
 
 ## Next Steps
 
-- [Choose an embedding model](/guide/embeddings) — `all-MiniLM-L6-v2` is a good default
-- [Understand search](/guide/search) — when to use vector vs keyword vs hybrid
-- [Build a knowledge graph](/guide/graph) — entities, relationships, multi-hop traversal
-- [Configure retention](/guide/lifecycle) — Ebbinghaus curves, eviction, consolidation
-- [Set up deduplication](/guide/deduplication) — MinHash thresholds, contradiction detection
+- [REST API reference](/guide/rest-api) -- all HTTP endpoints documented
+- [Choose an embedding model](/guide/embeddings) -- `all-MiniLM-L6-v2` is a good default
+- [Understand search](/guide/search) -- when to use vector vs keyword vs hybrid
+- [Build a knowledge graph](/guide/graph) -- entities, relationships, multi-hop traversal
+- [Configure retention](/guide/lifecycle) -- Ebbinghaus curves, eviction, consolidation
+- [Set up deduplication](/guide/deduplication) -- MinHash thresholds, contradiction detection
+- [Observability](/guide/observability) -- metrics, health checks, monitoring
 
 ---
 

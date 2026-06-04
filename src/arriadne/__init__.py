@@ -27,7 +27,7 @@ Usage:
     uvicorn.run(app, port=8899)
 """
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 
 from arriadne.interface import AriadneMemory
 from arriadne.config import AriadneConfig
@@ -68,6 +68,26 @@ except ImportError:
     MemoryLifecycle = None
 
 try:
+    from arriadne.community import CommunityDetector, Community
+except ImportError:
+    CommunityDetector = None
+
+try:
+    from arriadne.nli import EnhancedContradictionDetector, NLIResult
+except ImportError:
+    EnhancedContradictionDetector = None
+
+try:
+    from arriadne.scoring import MemoryImportanceScorer, ImportanceScore
+except ImportError:
+    MemoryImportanceScorer = None
+
+try:
+    from arriadne.client import AriadneClient, AriadneClientAsync
+except ImportError:
+    AriadneClient = None
+
+try:
     from arriadne.server import create_app
 except ImportError:
     create_app = None
@@ -94,5 +114,13 @@ __all__ = [
     "TemporalFact",
     "MemoryConsolidator",
     "MemoryLifecycle",
+    "CommunityDetector",
+    "Community",
+    "EnhancedContradictionDetector",
+    "NLIResult",
+    "MemoryImportanceScorer",
+    "ImportanceScore",
+    "AriadneClient",
+    "AriadneClientAsync",
     "create_app",
 ]

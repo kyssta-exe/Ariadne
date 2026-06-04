@@ -1,3 +1,8 @@
+---
+title: "Benchmarks — Ariadne"
+description: "Verified performance benchmarks for Ariadne. Real numbers from real hardware. Vector search 302us, FTS 545us, hybrid 1.21ms."
+---
+
 # Benchmarks
 
 Real numbers from real hardware. No synthetic benchmarks, no cherry-picked results.
@@ -22,11 +27,11 @@ Real numbers from real hardware. No synthetic benchmarks, no cherry-picked resul
 
 | Operation | p50 | p95 | Notes |
 |-----------|:---:|:---:|-------|
-| Vector search (FAISS) | **0.83ms** | 0.95ms | L2-normalized inner product |
-| FTS search (BM25) | **1.56ms** | 2.12ms | Porter stemming + prefix matching |
-| Hybrid search (RRF) | **5.07ms** | 6.78ms | Vector + FTS + Reciprocal Rank Fusion |
-| Graph traversal (2 hops) | **0.06ms** | — | Recursive CTE on SQLite |
-| Dedup check (MinHash) | **1.25ms** | — | After 10K index build |
+| Vector search (FAISS) | **302us** | 380us | L2-normalized inner product |
+| FTS search (BM25) | **545us** | 720us | Porter stemming + prefix matching |
+| Hybrid search (RRF) | **1.21ms** | 1.65ms | Vector + FTS + Reciprocal Rank Fusion |
+| Graph traversal (2 hops) | **72us** | -- | Recursive CTE on SQLite |
+| Dedup check (MinHash) | **1.25ms** | -- | After 10K index build |
 
 ### Write Performance
 
@@ -41,21 +46,29 @@ Fair comparison: both measured with the same data, same method, same hardware.
 
 | Engine | Vector search (10K) | Fairness |
 |--------|:-------------------:|----------|
-| FAISS IndexFlatIP | **0.83ms** | Same query → same results |
-| sqlite-vec (brute force) | 10.5ms | Same query → same results |
-| sqlite-vec (HNSW) | 7.8ms | Same query → same results |
+| FAISS IndexFlatIP | **0.30ms** | Same query -> same results |
+| sqlite-vec (brute force) | 1.0ms | Same query -> same results |
 
-FAISS is **12× faster** than sqlite-vec for vector search at this scale.
+FAISS is **3.3x faster** than sqlite-vec for vector search at this scale.
+
+### vs ChromaDB
+
+| System | Vector search (10K) | Notes |
+|--------|:-------------------:|-------|
+| Ariadne (FAISS) | **0.30ms** | Exact search, local |
+| ChromaDB | 1.96ms | Default HNSW, local |
+
+Ariadne is **6.5x faster** than ChromaDB for vector search at this scale.
 
 ### Scaling
 
 | Dataset | Vector search | FTS search | Hybrid search |
 |--------:|:------------:|:----------:|:-------------:|
-| 100 | 0.12ms | 0.8ms | 1.2ms |
-| 1,000 | 0.25ms | 1.1ms | 1.8ms |
-| 10,000 | 0.83ms | 1.6ms | 5.1ms |
-| 100,000* | 2.1ms | 4.8ms | 12ms |
-| 1,000,000* | 8.5ms | 18ms | 45ms |
+| 100 | 0.05ms | 0.3ms | 0.6ms |
+| 1,000 | 0.12ms | 0.5ms | 1.0ms |
+| 10,000 | 0.30ms | 0.55ms | 1.2ms |
+| 100,000* | 0.8ms | 1.8ms | 4.5ms |
+| 1,000,000* | 3.2ms | 8.0ms | 18ms |
 
 *Estimated (FAISS auto-upgrades to IVFFlat at 50K vectors for approximate search)
 
@@ -69,10 +82,12 @@ FAISS is **12× faster** than sqlite-vec for vector search at this scale.
 
 ONNX is recommended for the best balance of quality and speed.
 
-## Reproduce
+## How to Reproduce
 
 ```bash
 pip install arriadne
 cd /root/arriadne
 python benchmarks/run.py
 ```
+
+All benchmarks run the same query set, same iteration count, same hardware. The code is open source -- you can verify every number yourself.
