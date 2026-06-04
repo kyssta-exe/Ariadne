@@ -1,0 +1,45 @@
+name: Deploy Docs to Vercel
+
+on:
+  push:
+    paths:
+      - 'docs/**'          # Trigger only when docs change
+      - '.github/workflows/docs.yml'
+      - 'package.json'
+    branches:
+      - main
+  workflow_dispatch:        # Also allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: docs
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build docs
+        run: npx vitepress build docs
+
+      - name: Deploy to Vercel
+        id: deploy
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prod'
+          working-directory: ./
+          github-token: ${{ secrets.GITHUB_TOKEN }}

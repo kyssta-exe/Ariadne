@@ -1,0 +1,64 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v0.1.0, v1.0.0, etc.
+  workflow_dispatch:  # Also allow manual trigger from GitHub UI
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/arriadne
+    permissions:
+      id-token: write  # Required for trusted publishing (OIDC)
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Verify tag matches version
+        run: |
+          TAG_VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')
+          PYPROJECT_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "ERROR: Git tag 'v$TAG_VERSION' does not match pyproject.toml version '$PYPROJECT_VERSION'"
+            exit 1
+          fi
+          echo "Version $TAG_VERSION verified"
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check package
+        run: python -m twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses trusted publishing (OIDC) — no API token needed if you set it up on PyPI
+        # If you prefer API token auth, uncomment below and add PYPI_API_TOKEN secret:
+        # with:
+        #   password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30

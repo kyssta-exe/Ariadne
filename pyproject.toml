@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Mantes", email = "dev@nousresearch.com" },
+    { name = "Kyssta", email = "kyssta@users.noreply.github.com" },
 ]
 keywords = ["memory", "semantic-search", "vector-search", "knowledge-graph", "ai-agent"]
 classifiers = [
@@ -45,9 +45,9 @@ dev = [
 ariadne = "arriadne.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/mantes/arriadne"
-Repository = "https://github.com/mantes/arriadne"
-Changelog = "https://github.com/mantes/arriadne/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/kyssta-exe/Ariadne"
+Repository = "https://github.com/kyssta-exe/Ariadne"
+Changelog = "https://github.com/kyssta-exe/Ariadne/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/arriadne"]
