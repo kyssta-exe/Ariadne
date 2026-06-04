@@ -9,11 +9,7 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/arriadne
     permissions:
-      id-token: write  # Required for trusted publishing (OIDC)
       contents: read
 
     steps:
@@ -50,10 +46,8 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # Uses trusted publishing (OIDC) — no API token needed if you set it up on PyPI
-        # If you prefer API token auth, uncomment below and add PYPI_API_TOKEN secret:
-        # with:
-        #   password: ${{ secrets.PYPI_API_TOKEN }}
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
