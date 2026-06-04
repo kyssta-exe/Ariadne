@@ -27,7 +27,7 @@ Usage:
     uvicorn.run(app, port=8899)
 """
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
 
 from arriadne.interface import AriadneMemory
 from arriadne.config import AriadneConfig
