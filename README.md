@@ -211,12 +211,14 @@ pip install "arriadne[dev]"      # Development tools
 
 ## Hermes Integration
 
+Ariadne is the default memory provider for [Hermes Agent](https://hermes-agent.nousresearch.com). It auto-detects Hermes's LLM and uses it for extraction — zero configuration.
+
 ```bash
 hermes plugin install arriadne
 hermes config set memory.provider ariadne
 ```
 
-The plugin auto-detects Hermes's LLM and uses it for extraction — zero configuration.
+That's it. For the full setup guide — including config options, migration from Mnemosyne, and troubleshooting — see the **[Hermes Integration Guide](https://ariadne.mantes.net/guide/hermes)**.
 
 ---
 
