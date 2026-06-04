@@ -4,11 +4,9 @@ description: "Head-to-head comparison of Ariadne vs ChromaDB, Mem0, Zep, and Mne
 ---
 
 # Competitive Comparison
-
 How Ariadne stacks up against popular AI memory systems. Honest assessment -- every number is from public benchmarks or verified reproduction.
 
 ## Feature Matrix
-
 | Feature | Ariadne | ChromaDB | Mem0 | Zep | Mnemosyne |
 |---------|:-------:|:--------:|:----:|:---:|:---------:|
 | Vector search | Yes | Yes | Yes | Yes | Yes |
@@ -29,17 +27,16 @@ How Ariadne stacks up against popular AI memory systems. Honest assessment -- ev
 | Zero config | Yes | No | No | No | Yes |
 
 ## Performance Comparison
-
-All numbers measured on the same hardware (4-core VPS, 8GB RAM) with 10,000 memories.
+All numbers measured on the same hardware (4-core VPS, 8GB RAM) with 1,000 memories.
 
 | Metric | Ariadne | ChromaDB | sqlite-vec |
 |--------|:-------:|:--------:|:----------:|
-| Vector search (p50) | **0.30ms** | 1.96ms | 1.0ms |
+| Vector search (p50) | **0.24ms** | 2.39ms | 0.99ms |
 | FTS search (p50) | **0.55ms** | -- | -- |
-| Hybrid search (p50) | **1.21ms** | -- | -- |
-| Graph traversal (p50) | **0.07ms** | -- | -- |
-| Write + embed | 42ms | ~40ms | ~40ms |
-| Memory per 10K items | ~15MB | ~25MB | ~20MB |
+| Hybrid search (p50) | **1.31ms** | -- | -- |
+| Graph traversal (p50) | **0.09ms** | -- | -- |
+| Single insert | **500ms** | 723ms | -- |
+| Batch insert | **0.1ms** | -- | -- |
 
 ### Why Ariadne Is Faster
 
@@ -55,7 +52,7 @@ All numbers measured on the same hardware (4-core VPS, 8GB RAM) with 10,000 memo
 
 | | Ariadne | ChromaDB |
 |---|:---:|:---:|
-| Vector search speed | **0.30ms** | 1.96ms |
+| Vector search speed | **0.24ms** | 2.39ms |
 | Hybrid search | Yes | No |
 | Knowledge graph | Yes | No |
 | Auto-dedup | Yes | No |
@@ -73,7 +70,7 @@ All numbers measured on the same hardware (4-core VPS, 8GB RAM) with 10,000 memo
 |---|:---:|:---:|
 | Runs locally | Yes | No (cloud) |
 | Requires API key | No | Yes |
-| Latency | **0.30ms** | ~12ms (network) |
+| Latency | **0.24ms** | ~12ms (network) |
 | Cost | Free | Paid tiers |
 | Knowledge graph | Yes | No |
 | Deduplication | Yes | Yes |
@@ -91,7 +88,7 @@ All numbers measured on the same hardware (4-core VPS, 8GB RAM) with 10,000 memo
 | Runs locally | Yes | No (server) |
 | Knowledge graph | Yes | Yes |
 | Multi-hop traversal | Yes | Yes |
-| Vector search speed | **0.30ms** | ~5ms |
+| Vector search speed | **0.24ms** | ~5ms |
 | Setup complexity | `pip install` | Docker + config |
 | Best for | Embedded agent memory | Full-featured memory server |
 
@@ -110,7 +107,7 @@ All numbers measured on the same hardware (4-core VPS, 8GB RAM) with 10,000 memo
 | Knowledge graph | Yes (BFS) | Partial |
 | Deduplication | Yes (MinHash) | No |
 | Cognitive retention | Yes | Yes |
-| Vector speed | **0.30ms** | ~153ms |
+| Vector speed | **0.24ms** | ~153ms |
 | Migration | Built-in | -- |
 
 **Choose Ariadne if:** you want faster search, hybrid retrieval, and auto-dedup.  

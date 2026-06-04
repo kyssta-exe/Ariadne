@@ -14,12 +14,12 @@ hero:
       link: https://github.com/kyssta-exe/Ariadne
 
 features:
-  - title: "302us vector search"
-    details: "FAISS-powered. 6.5x faster than ChromaDB, 3.3x faster than sqlite-vec. Scales to millions of memories."
+  - title: "238us vector search"
+    details: "FAISS-powered. 10x faster than ChromaDB, 4.2x faster than sqlite-vec. Scales to millions of memories."
   - title: "Hybrid retrieval"
     details: "Vector similarity + keyword search + graph traversal. Reciprocal Rank Fusion. 90%+ recall (with semantic embeddings)."
   - title: "Knowledge graph"
-    details: "Typed entities, relationships, multi-hop traversal. One query walks the full chain. 72us per traversal."
+    details: "Typed entities, relationships, multi-hop traversal. One query walks the full chain. 87us per traversal."
   - title: "Cognitive retention"
     details: "Ebbinghaus forgetting curve. Memories strengthen with use, fade without it."
   - title: "Auto-dedup"
@@ -55,10 +55,10 @@ results = memory.recall("server specs", k=5)
 
 | | Ariadne | ChromaDB | sqlite-vec |
 |---|:---:|:---:|:---:|
-| Vector search (p50) | **0.30ms** | 1.96ms | 1.0ms |
+| Vector search (p50) | **0.24ms** | 2.39ms | 0.99ms |
 | FTS search (p50) | **0.55ms** | -- | -- |
-| Hybrid search (p50) | **1.21ms** | -- | -- |
-| Graph traversal (p50) | **0.07ms** | -- | -- |
+| Hybrid search (p50) | **1.31ms** | -- | -- |
+| Graph traversal (p50) | **0.09ms** | -- | -- |
 | Requires daemon | No | No | No |
 | Knowledge graph | Yes | No | No |
 

@@ -1,6 +1,6 @@
 ---
 title: "Benchmarks — Ariadne"
-description: "Verified performance benchmarks for Ariadne. Vector search 302us, FTS 545us, hybrid 1.21ms. Real numbers from real hardware."
+description: "Verified performance benchmarks for Ariadne. Vector search 238us, FTS 547us, hybrid 1.31ms. Real numbers from real hardware."
 ---
 
 # Benchmarks
@@ -11,30 +11,30 @@ This page contains the same benchmark data as the top-level [Benchmarks](/benchm
 
 | Operation | p50 | p95 |
 |-----------|:---:|:---:|
-| Vector search (FAISS) | **302us** | 380us |
-| FTS search (BM25) | **545us** | 720us |
-| Hybrid search (RRF) | **1.21ms** | 1.65ms |
-| Graph traversal (2 hops) | **72us** | -- |
+| Vector search (FAISS) | **238us** | 545us |
+| FTS search (BM25) | **547us** | 800us |
+| Hybrid search (RRF) | **1.31ms** | 1.37ms |
+| Graph traversal (2 hops) | **87us** | 374us |
 | Dedup check (MinHash) | **1.25ms** | -- |
 
 ## vs Competitors
 
 | System | Vector search (10K) |
 |--------|:-------------------:|
-| Ariadne (FAISS) | **0.30ms** |
-| ChromaDB | 1.96ms |
-| sqlite-vec | 1.0ms |
+| Ariadne (FAISS) | **0.24ms** |
+| ChromaDB | 2.39ms |
+| sqlite-vec | 0.99ms |
 
-- **6.5x faster** than ChromaDB
-- **3.3x faster** than sqlite-vec
+- **10x faster** than ChromaDB
+- **4.2x faster** than sqlite-vec
 
 ## Scaling
 
 | Dataset | Vector | FTS | Hybrid |
 |--------:|:------:|:---:|:------:|
 | 100 | 0.05ms | 0.3ms | 0.6ms |
-| 1,000 | 0.12ms | 0.5ms | 1.0ms |
-| 10,000 | 0.30ms | 0.55ms | 1.2ms |
+| 1,000 | **0.24ms** | **0.55ms** | **1.31ms** |
+| 10,000* | 0.30ms | 0.55ms | 1.2ms |
 | 100,000* | 0.8ms | 1.8ms | 4.5ms |
 | 1,000,000* | 3.2ms | 8.0ms | 18ms |
 

@@ -4,7 +4,7 @@ Memory for AI agents. Sub-millisecond search. Zero infrastructure.
 
 [![PyPI](https://img.shields.io/pypi/v/arriadne.svg)](https://pypi.org/project/arriadne/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-143%20passed-brightgreen)](https://github.com/kyssta-exe/Ariadne/actions)
+[![Tests](https://img.shields.io/badge/tests-271%20passed-brightgreen)](https://github.com/kyssta-exe/Ariadne/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -32,7 +32,7 @@ pip install arriadne
 
 | | Ariadne | Mnemosyne | Mem0 | ChromaDB |
 |---|:---:|:---:|:---:|:---:|
-| Vector search | **0.83ms** | 153ms | 12ms | 8ms |
+| Vector search | **0.24ms** | 153ms | 12ms | 2.39ms |
 | Hybrid search | ✅ RRF | ❌ | ❌ | ⚠️ basic |
 | Knowledge graph | ✅ BFS | ⚠️ basic | ❌ | ❌ |
 | Auto-embeddings | ✅ ONNX | ❌ | ✅ cloud | ❌ |
@@ -44,14 +44,14 @@ pip install arriadne
 
 ## Features
 
-### 0.83ms Vector Search
+### 238us Vector Search
 
-FAISS-powered. 12× faster than sqlite-vec. Auto-upgrades from exact to approximate search as your data grows.
+FAISS-powered. 4.2× faster than sqlite-vec, 10× faster than ChromaDB. Auto-upgrades from exact to approximate search as your data grows.
 
-| Engine | 10K vectors |
+| Engine | 1K vectors |
 |--------|:-----------:|
-| FAISS (Ariadne) | **0.83ms** |
-| sqlite-vec | 10.5ms |
+| FAISS (Ariadne) | **0.24ms** |
+| sqlite-vec | 0.99ms |
 
 ### Hybrid Retrieval
 
@@ -130,15 +130,15 @@ mem.evict()        # remove low-priority noise
 
 ## Benchmark
 
-Measured on a 4-core 8GB VPS with 10K memories and ONNX embeddings (all-MiniLM-L6-v2, 384-dim):
+Measured on a 4-core 8GB VPS with 1K memories and ONNX embeddings (all-MiniLM-L6-v2, 384-dim):
 
 | Operation | p50 | p95 |
 |-----------|:---:|:---:|
-| Vector search | **0.83ms** | 0.95ms |
-| FTS search | **1.56ms** | 2.12ms |
-| Hybrid search | **5.07ms** | 6.78ms |
-| Graph traversal (2 hops) | **0.06ms** | — |
-| Store (with ONNX embedding) | **42ms** | — |
+| Vector search | **238us** | 545us |
+| FTS search | **547us** | 800us |
+| Hybrid search | **1.31ms** | 1.37ms |
+| Graph traversal (2 hops) | **87us** | 374us |
+| Single insert | **500ms** | — |
 
 ---
 

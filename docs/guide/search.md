@@ -1,6 +1,6 @@
 ---
 title: "Search & Retrieval — Ariadne"
-description: "Hybrid search with FAISS vector similarity, FTS5 keyword matching, and Reciprocal Rank Fusion. 90%+ recall@10 (with semantic embeddings)."
+description: "Hybrid search with FAISS vector similarity, FTS5 keyword matching, and Reciprocal Rank Fusion. 238us vector search, 90%+ recall@10 (with semantic embeddings)."
 ---
 
 
@@ -169,9 +169,9 @@ results = mem.recall(
 
 | Metric | Value |
 |--------|-------|
-| Vector search latency | ~0.30ms (10K memories) |
-| FTS5 search latency | ~0.55ms (10K memories) |
-| Hybrid search latency | ~1.21ms (10K memories) |
+| Vector search latency | **238us** (1K memories) |
+| FTS5 search latency | **547us** (1K memories) |
+| Hybrid search latency | **1.31ms** (1K memories) |
 | Recall@10 | 92% |
 
 ## Advanced: Direct Access to Search Engines
@@ -222,5 +222,5 @@ Use **vector** for semantic queries ("how do I deploy this"). Use **keyword** fo
 Yes. Any embedding model works. Recommended: `sentence-transformers` with `all-MiniLM-L6-v2` for 384-dim vectors. Without embeddings, Ariadne falls back to keyword-only search.
 
 ### How fast is search at scale?
-10K memories: **0.30ms** (vector), **1.21ms** (hybrid). 100K memories: **0.8ms** (vector). FAISS auto-upgrades from exact to approximate search.
+1K memories: **238us** (vector), **1.31ms** (hybrid). 100K memories: **0.8ms** (vector). FAISS auto-upgrades from exact to approximate search.
 

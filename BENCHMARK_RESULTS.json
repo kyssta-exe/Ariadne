@@ -4,37 +4,37 @@
   "dim": 384,
   "benchmarks": {
     "ariadne": {
-      "insert_total_ms": 1111792.8,
-      "insert_per_ms": 1111.79,
-      "vector_p50us": 302.0,
-      "vector_p95us": 78639.0,
-      "fts_p50us": 545.0,
-      "fts_p95us": 910.0,
-      "hybrid_p50us": 1213.0,
-      "hybrid_p95us": 1524.0,
-      "graph_p50us": 72.0,
-      "graph_p95us": 602.0,
-      "db_kb": 2400.0,
+      "insert_total_ms": 500488.9,
+      "insert_per_ms": 500.49,
+      "vector_p50us": 238.0,
+      "vector_p95us": 545.0,
+      "fts_p50us": 547.0,
+      "fts_p95us": 800.0,
+      "hybrid_p50us": 1313.0,
+      "hybrid_p95us": 1370.0,
+      "graph_p50us": 87.0,
+      "graph_p95us": 374.0,
+      "db_kb": 2420.0,
       "faiss_kb": 0.0,
-      "total_kb": 2400.0
+      "total_kb": 2420.0
     },
     "chromadb": {
-      "insert_total_ms": 737501.9,
-      "insert_per_ms": 737.5,
-      "vector_p50us": 1964.0,
-      "vector_p95us": 7234.0,
+      "insert_total_ms": 723337.9,
+      "insert_per_ms": 723.34,
+      "vector_p50us": 2388.0,
+      "vector_p95us": 7152.0,
       "total_kb": 2932.0
     },
     "sqlite_vec": {
-      "insert_total_ms": 53629.0,
-      "insert_per_ms": 53.63,
-      "vector_p50us": 986.0,
-      "vector_p95us": 3193.0,
+      "insert_total_ms": 57531.9,
+      "insert_per_ms": 57.53,
+      "vector_p50us": 990.0,
+      "vector_p95us": 3579.0,
       "total_kb": 3592.0
     },
     "faiss_raw": {
-      "vector_p50us": 70.0,
-      "vector_p95us": 145.0
+      "vector_p50us": 92.0,
+      "vector_p95us": 148.0
     }
   }
 }

@@ -1,6 +1,6 @@
 ---
 title: "Introduction — Ariadne"
-description: "Ariadne is a local memory system for AI agents. Sub-millisecond hybrid search, cognitive retention, and knowledge graph traversal. Zero infrastructure."
+description: "Ariadne is a local memory system for AI agents. 238us vector search, cognitive retention, and knowledge graph traversal. Zero infrastructure."
 ---
 
 
@@ -26,7 +26,7 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 │  │  FAISS   │  │  FTS5    │  │  Knowledge   │  │
 │  │  Vector  │  │  Keyword │  │  Graph       │  │
 │  │  Search  │  │  Search  │  │  (BFS/DFS)   │  │
-│  │  0.89ms  │  │  1.74ms  │  │  0.06ms       │  │
+│  │  0.24ms  │  │  0.55ms  │  │  0.09ms      │  │
 │  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
 │       │              │               │           │
 │       └──────┬───────┴───────────────┘           │
@@ -48,21 +48,21 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 
 | Operation | Latency | Scale |
 |-----------|---------|-------|
-| Vector search (FAISS) | **0.30ms** | 10K memories |
-| Keyword search (FTS5) | **0.55ms** | 10K memories |
-| Hybrid search (RRF) | **1.21ms** | 10K memories |
-| Dedup check (MinHash LSH) | **1.25ms** | 10K documents |
-| Graph traversal (2 hops) | **0.07ms** | 10K entities |
+| Vector search (FAISS) | **0.24ms** | 1K memories |
+| Keyword search (FTS5) | **0.55ms** | 1K memories |
+| Hybrid search (RRF) | **1.31ms** | 1K memories |
+| Dedup check (MinHash LSH) | **1.25ms** | 1K documents |
+| Graph traversal (2 hops) | **0.09ms** | 1K entities |
 
 ## What Makes It Different
 
-1. **SQLite + FAISS** — Not sqlite-vec (200× slower). Not PostgreSQL (requires a server). Just SQLite for metadata/FTS5/graph, FAISS for vectors. Both embedded in-process.
+1. **SQLite + FAISS** — Not sqlite-vec (4.2× slower). Not PostgreSQL (requires a server). Just SQLite for metadata/FTS5/graph, FAISS for vectors. Both embedded in-process.
 
 2. **Ebbinghaus Forgetting Curve** — Memories strengthen with each access and fade without it. Stability grows exponentially with reinforcement.
 
 3. **Priority-Based Retention** — When the memory budget is hit, low-priority memories get soft-deleted. High-importance memories are protected.
 
-4. **Auto-Deduplication** — MinHash LSH catches near-duplicates at 1.25ms before they enter the system. No more redundant memories.
+4. **Auto-Deduplication** — MinHash LSH catches near-duplicates before they enter the system. No more redundant memories.
 
 5. **Knowledge Graph** — Entities and typed relationships with multi-hop BFS traversal. Find connections that vector search alone would miss.
 
@@ -74,7 +74,7 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 Ariadne is a local memory system for AI agents. It stores, searches, and manages memories using FAISS vector search, SQLite FTS5 keywords, a knowledge graph, and cognitive retention modeling. No cloud, no API keys, no daemon.
 
 ### How fast is Ariadne?
-Ariadne's FAISS vector search returns results in **0.30ms** across 10,000 memories. Hybrid search (vector + keyword + graph) completes in **1.21ms**. This is 6.5x faster than ChromaDB and 3.3x faster than sqlite-vec.
+Ariadne's FAISS vector search returns results in **238us** across 1,000 memories. Hybrid search (vector + keyword + graph) completes in **1.31ms**. This is 10x faster than ChromaDB and 4.2x faster than sqlite-vec.
 
 ### Does Ariadne work with Hermes Agent?
 Yes. Ariadne ships as a drop-in plugin for Hermes Agent. Install the plugin, set `memory.provider: ariadne`, restart. All existing tool names and conversations work unchanged.
