@@ -409,30 +409,8 @@ class AriadneDB:
             END;
         """)
 
-        # API keys table: authentication for multi-tenant agents
-        cursor.executescript("""
-            CREATE TABLE IF NOT EXISTS api_keys (
-                key_id          TEXT PRIMARY KEY,
-                agent_name      TEXT NOT NULL,
-                tenant_id       TEXT NOT NULL DEFAULT 'default',
-                key_hash        TEXT NOT NULL,
-                hmac_secret     TEXT NOT NULL,
-                scopes          TEXT NOT NULL DEFAULT '[]',
-                rate_limit_rpm  INTEGER NOT NULL DEFAULT 60,
-                is_revoked      INTEGER NOT NULL DEFAULT 0,
-                created_at      REAL NOT NULL,
-                updated_at      REAL NOT NULL,
-                revoked_at      REAL,
-                last_used_at    REAL,
-                use_count       INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_api_keys_agent ON api_keys(agent_name);
-            CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
-            CREATE INDEX IF NOT EXISTS idx_api_keys_revoked ON api_keys(is_revoked);
-        """)
-
-        self._commit()
+        # API keys table managed by auth.keys.APIKeyManager (not here)
+        # to avoid schema conflicts between auth module and storage module.
         logger.debug("Schema created/verified")
 
     def _load_faiss_index(self) -> None:
