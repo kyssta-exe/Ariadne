@@ -35,7 +35,7 @@ jobs:
           npm i -g vercel@latest
           
           # Let Vercel build and deploy (uses vercel.json for config)
-          DEPLOY_OUTPUT=$(vercel deploy --prod \
+          DEPLOY_OUTPUT=$(vercel deploy --prod --force --debug \
             --token="${{ secrets.VERCEL_TOKEN }}" \
             --yes \
             2>&1)
