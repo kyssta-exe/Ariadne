@@ -107,12 +107,20 @@ class OpenAIProvider(BaseLLMProvider):
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self._model = model
         self._timeout = timeout
-        self._client = openai.AsyncOpenAI(
-            api_key=self._api_key,
-            base_url=base_url,
-            organization=organization,
-            timeout=timeout,
-        )
+        self._base_url = base_url
+        self._organization = organization
+        self._client = None  # Lazy init — only create when key is present
+
+    def _ensure_client(self):
+        """Create the OpenAI client on first use (lazy)."""
+        if self._client is None:
+            import openai
+            self._client = openai.AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                organization=self._organization,
+                timeout=self._timeout,
+            )
 
     @property
     def name(self) -> str:
@@ -138,6 +146,7 @@ class OpenAIProvider(BaseLLMProvider):
             kwargs["response_format"] = response_format
 
         t0 = time.monotonic()
+        self._ensure_client()
         resp = await self._client.chat.completions.create(**kwargs)
         latency = (time.monotonic() - t0) * 1000
 
