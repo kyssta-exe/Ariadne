@@ -1,4 +1,4 @@
-name: Deploy Docs to Vercel
+name: Deploy Docs
 
 on:
   push:
@@ -6,17 +6,23 @@ on:
       - 'docs/**'
       - '.github/workflows/docs.yml'
       - 'package.json'
+      - 'vercel.json'
     branches:
       - main
   workflow_dispatch:
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    environment:
-      name: docs
-      url: ${{ steps.deploy.outputs.url }}
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,23 +35,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Deploy to Vercel
-        id: deploy
-        run: |
-          npm i -g vercel@latest
-          
-          # Let Vercel build and deploy (uses vercel.json for config)
-          DEPLOY_OUTPUT=$(vercel deploy --prod --force --debug \
-            --token="${{ secrets.VERCEL_TOKEN }}" \
-            --yes \
-            2>&1)
-          
-          echo "$DEPLOY_OUTPUT"
-          
-          # Extract the deployment URL
-          DEPLOY_URL=$(echo "$DEPLOY_OUTPUT" | grep -oP 'https://[a-zA-Z0-9.-]+\.vercel\.app\b' | tail -1)
-          echo "url=$DEPLOY_URL" >> "$GITHUB_OUTPUT"
-          echo "Deployed to: $DEPLOY_URL"
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      - name: Build docs
+        run: npx vitepress build docs
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
