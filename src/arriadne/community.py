@@ -16,7 +16,6 @@ external graph libraries.
 from __future__ import annotations
 
 import logging
-import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field

@@ -99,11 +99,6 @@ class AriadneVectorStore:
 
     def add_documents(self, documents: List[Any], **kwargs: Any) -> List[str]:
         """Add LangChain Document objects."""
-        try:
-            from langchain_core.documents import Document
-        except ImportError:
-            raise ImportError("pip install langchain-core")
-
         texts = [doc.page_content for doc in documents]
         metadatas = [doc.metadata for doc in documents]
         return self.add_texts(texts, metadatas=metadatas)

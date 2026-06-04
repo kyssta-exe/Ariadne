@@ -18,7 +18,6 @@ import os
 import re
 import struct
 import threading
-import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any

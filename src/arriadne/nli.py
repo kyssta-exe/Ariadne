@@ -17,7 +17,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -404,7 +404,6 @@ class StreamingSearchEngine:
         - source: "fts", "vector", or "hybrid"
         - done: True if this is the final result
         """
-        import json
         from arriadne.storage import _fts_escape
 
         seen_ids = set()
@@ -447,10 +446,7 @@ class StreamingSearchEngine:
         # Phase 2: Vector results (if embedding available)
         if embedding is not None and rank < limit:
             try:
-                from arriadne.storage import AriadneDB
                 # Use the FAISS index directly
-                emb = embedding / (np.linalg.norm(embedding) + 1e-10)
-                vec = emb.reshape(1, -1).astype(np.float32)
 
                 # This is a simplified version - in production you'd
                 # access the FAISS index directly

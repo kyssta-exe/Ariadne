@@ -395,7 +395,6 @@ class AriadneClient:
                 yield {"result": result, "rank": i + 1, "done": i == len(results) - 1}
             return
 
-        import requests
         session = self._get_session()
         url = f"{self._base_url}/search/stream"
         params = {"query": query, "limit": limit}
@@ -726,7 +725,6 @@ class AriadneClientAsync:
         client = await self._get_client()
         url = f"{self._base_url}{path}"
 
-        last_error = None
         for attempt in range(self._max_retries + 1):
             try:
                 if method == "GET":
@@ -741,7 +739,7 @@ class AriadneClientAsync:
                     response = await client.request(method, url, json=data)
 
                 if response.status_code == 401:
-                    raise AriadneAuthError(f"Authentication failed")
+                    raise AriadneAuthError("Authentication failed")
                 elif response.status_code == 404:
                     raise AriadneNotFoundError(f"Not found: {path}")
                 elif response.status_code == 429:
@@ -755,7 +753,7 @@ class AriadneClientAsync:
             except AriadneError:
                 raise
             except Exception as e:
-                last_error = e
+                pass  # store error for next attempt
                 if attempt < self._max_retries:
                     import asyncio
                     await asyncio.sleep(0.5 * (2 ** attempt))

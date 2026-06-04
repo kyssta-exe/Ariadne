@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("arriadne.consolidation")
@@ -374,7 +374,6 @@ Memories to consolidate:
                 response_format={"type": "json_object"},
             )
 
-            import json
             data = response.json()
             if isinstance(data, dict):
                 consolidated = data.get("memories", data.get("memory", []))
@@ -413,7 +412,6 @@ Memories to consolidate:
     ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         """Simple consolidation without LLM — concatenate and deduplicate."""
         # Take the longest text as primary (likely most informative)
-        longest = max(memory_texts, key=len)
 
         # Simple deduplication of sentences
         sentences = set()

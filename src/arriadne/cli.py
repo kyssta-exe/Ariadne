@@ -273,7 +273,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 return 1
         except requests.ConnectionError:
             print(f"\n  ERROR: Cannot connect to {url}")
-            print(f"  Is the server running? Start with: arriadne serve")
+            print("  Is the server running? Start with: arriadne serve")
             return 1
         except Exception as e:
             print(f"\n  Health check error: {e}")
@@ -351,7 +351,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         search_count = 0
         for q in queries:
             for _ in range(100):
-                results = mem.recall(q, k=10)
+                mem.recall(q, k=10)
                 search_count += 1
         search_time = time.time() - t0
         search_rate = search_count / search_time if search_time > 0 else 0
@@ -376,7 +376,6 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         mem.close()
 
         # Cleanup
-        import os
         for suffix in ["", "-wal", "-shm", ".faiss"]:
             p = Path(db_path + suffix)
             if p.exists():

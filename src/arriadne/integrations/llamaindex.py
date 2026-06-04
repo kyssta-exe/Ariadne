@@ -98,7 +98,8 @@ class AriadneLlamaIndexStore:
             query: A VectorStoreQuery object or a string query
         """
         try:
-            from llama_index.core.schema import TextNode, QueryBundle
+            from llama_index.core.schema import TextNode  # noqa: F401
+            from llama_index.core.schema import QueryBundle  # noqa: F401
         except ImportError:
             raise ImportError("pip install llama-index-core")
 
