@@ -32,12 +32,23 @@ jobs:
       - name: Build docs
         run: npx vitepress build docs
 
+      - name: Verify build output
+        run: |
+          echo "Build output:"
+          ls -la docs/.vitepress/dist/
+          echo ""
+          echo "index.html exists?"
+          test -f docs/.vitepress/dist/index.html && echo "YES" || echo "NO — THIS IS THE BUG"
+          echo ""
+          echo "File listing:"
+          find docs/.vitepress/dist -type f | head -30
+
       - name: Deploy to Vercel
         id: deploy
         run: |
           npm i -g vercel@latest
           
-          DEPLOY_URL=$(vercel deploy --prod \
+          DEPLOY_URL=$(vercel deploy --prebuilt --prod \
             --token="${{ secrets.VERCEL_TOKEN }}" \
             --yes \
             --cwd=. \
