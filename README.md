@@ -283,19 +283,30 @@ Ariadne was built as the successor to Mnemosyne (the memory system in Hermes Age
 
 ## Documentation
 
-Full documentation at [the docs site](https://github.com/kyssta-exe/Ariadne/tree/main/docs):
+Full documentation at **[ariadne.mantes.net](https://ariadne.mantes.net)**:
 
-- [Quick Start](docs/guide/quick-start.md)
-- [Installation](docs/guide/installation.md)
-- [Search & Retrieval](docs/guide/search.md)
-- [Knowledge Graph](docs/guide/graph.md)
-- [Memory Lifecycle](docs/guide/lifecycle.md)
-- [Embeddings](docs/guide/embeddings.md)
-- [Deduplication](docs/guide/deduplication.md)
-- [Migration Guide](docs/guide/migration.md)
-- [Architecture](docs/guide/architecture.md)
-- [API Reference](docs/api/index.md)
-- [Benchmarks](docs/benchmarks.md)
+- [Quick Start](https://ariadne.mantes.net/guide/quick-start)
+- [Installation](https://ariadne.mantes.net/guide/installation)
+- [Hermes Agent Setup](https://ariadne.mantes.net/guide/hermes)
+- [Search & Retrieval](https://ariadne.mantes.net/guide/search)
+- [Knowledge Graph](https://ariadne.mantes.net/guide/graph)
+- [API Reference](https://ariadne.mantes.net/api/)
+- [Benchmarks](https://ariadne.mantes.net/benchmarks)
+
+---
+
+## Hermes Agent Integration
+
+Ariadne works as a drop-in memory provider for [Hermes Agent](https://hermes-agent.nousresearch.com/). Install the plugin:
+
+```bash
+git clone https://github.com/kyssta-exe/Ariadne.git /tmp/ariadne-repo
+cp -r /tmp/ariadne-repo/plugin ~/.hermes/plugins/ariadne
+hermes config set memory.provider ariadne
+hermes restart
+```
+
+See the full [Hermes integration guide](https://ariadne.mantes.net/guide/hermes) for details.
 
 ---
 

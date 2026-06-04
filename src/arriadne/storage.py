@@ -667,10 +667,10 @@ class AriadneDB:
 
             # Update FAISS if embedding changed
             if embedding is not None and memory_id in self._id_map:
-                old_faiss_id = self._id_map[memory_id]
-                new_emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
-                # We can't update in-place for most FAISS indices, so we note the change
+                # Update FAISS if embedding changed
+                # We can't update in-place for most FAISS indices — note the change
                 # For production, would need index rebuild
+                pass
                 logger.debug("Updated embedding for memory %d (FAISS rebuild needed)", memory_id)
 
             self._commit()

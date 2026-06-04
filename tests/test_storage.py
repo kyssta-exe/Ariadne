@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import tempfile
 import time
 from pathlib import Path
@@ -137,7 +135,7 @@ class TestMemoryCRUD:
         result = db.add_memory("To be deleted")
         deleted = db.delete_memory(result["memory_id"], hard=False)
         assert deleted is True
-        memory = db.get_memory(result["memory_id"])
+        db.get_memory(result["memory_id"])
         # Soft deleted memories may still be returned by get_memory
         # but should not appear in search results
 
