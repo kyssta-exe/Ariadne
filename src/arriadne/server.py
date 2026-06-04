@@ -43,6 +43,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from arriadne.observability import ObservabilityCollector, RequestLogger, get_collector
+from arriadne.auth.keys import APIKeyManager, AuthContext
 
 logger = logging.getLogger("arriadne.server")
 
@@ -125,29 +126,45 @@ class TemporalFactRequest(BaseModel):
     valid_at: Optional[float] = None
 
 
+class CreateKeyRequest(BaseModel):
+    """Request body for POST /auth/keys."""
+    agent_name: str
+    tenant_id: str = "default"
+    scopes: List[str] = Field(default=["read", "write"])
+    rate_limit_rpm: int = Field(120, ge=1, le=10000)
+    expires_in_seconds: Optional[int] = None
+
 # === Rate Limiter ===
 
 class RateLimiter:
     """Simple in-memory token bucket rate limiter."""
 
-    def __init__(self, requests_per_minute: int = 120):
-        self._rpm = requests_per_minute
+    def __init__(self, default_rpm: int = 120):
+        self._default_rpm = default_rpm
         self._tokens: Dict[str, float] = {}
         self._timestamps: Dict[str, float] = {}
+        self._rpms: Dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def is_allowed(self, key: str) -> bool:
+    def is_allowed(self, key: str, rpm: Optional[int] = None) -> bool:
         """Check if a request is allowed for the given key."""
         now = time.time()
+        effective_rpm = rpm or self._default_rpm
         with self._lock:
             if key not in self._tokens:
-                self._tokens[key] = self._rpm
+                self._tokens[key] = effective_rpm
                 self._timestamps[key] = now
+                self._rpms[key] = effective_rpm
+
+            # If RPM changed for this key, adjust
+            if self._rpms.get(key) != effective_rpm:
+                self._rpms[key] = effective_rpm
+                self._tokens[key] = min(effective_rpm, self._tokens[key])
 
             # Refill tokens
             elapsed = now - self._timestamps[key]
-            refill = elapsed * (self._rpm / 60.0)
-            self._tokens[key] = min(self._rpm, self._tokens[key] + refill)
+            refill = elapsed * (effective_rpm / 60.0)
+            self._tokens[key] = min(effective_rpm, self._tokens[key] + refill)
             self._timestamps[key] = now
 
             if self._tokens[key] >= 1.0:
@@ -209,7 +226,8 @@ def create_app(
     """
     observability = get_collector()
     request_logger = RequestLogger()
-    rate_limiter = RateLimiter(requests_per_minute=rate_limit_rpm)
+    rate_limiter = RateLimiter(default_rpm=rate_limit_rpm)
+    key_manager = APIKeyManager(db_path)
 
     # Shutdown event for graceful shutdown
     _shutdown_event = threading.Event()
@@ -251,29 +269,36 @@ def create_app(
                     )
         return _memory
 
-    # Auth
+    # Auth is handled centrally by auth_middleware.
+    # This dependency is kept for backward compatibility with existing endpoint signatures.
     async def verify_api_key(authorization: Optional[str] = Header(None)):
-        if api_key:
-            if not authorization:
-                raise HTTPException(status_code=401, detail="Missing API key")
-            token = authorization.replace("Bearer ", "").strip()
-            if token != api_key:
-                raise HTTPException(status_code=401, detail="Invalid API key")
+        pass
 
     # === Request Timing & Rate Limiting Middleware ===
 
     @app.middleware("http")
     async def timing_middleware(request: Request, call_next):
-        # Rate limiting (skip for health/docs)
+        # Rate limiting (skip for public endpoints)
         path = request.url.path
-        if not path.startswith("/health") and not path.startswith("/ready") and not path.startswith("/docs") and not path.startswith("/redoc") and not path.startswith("/openapi"):
-            client_ip = request.client.host if request.client else "unknown"
-            rate_key = f"{client_ip}:{api_key or 'default'}"
-            if not rate_limiter.is_allowed(rate_key):
+        _skip_rate = (
+            path.startswith("/health") or path.startswith("/ready")
+            or path.startswith("/docs") or path.startswith("/redoc")
+            or path.startswith("/openapi") or path == "/"
+        )
+        if not _skip_rate:
+            auth_ctx: Optional[AuthContext] = getattr(request.state, "auth", None)
+            if auth_ctx:
+                rate_key = auth_ctx.key_id
+                rate_rpm = auth_ctx.rate_limit_rpm
+            else:
+                client_ip = request.client.host if request.client else "unknown"
+                rate_key = f"{client_ip}:{api_key or 'default'}"
+                rate_rpm = rate_limit_rpm
+            if not rate_limiter.is_allowed(rate_key, rpm=rate_rpm):
                 return JSONResponse(
                     status_code=429,
-                    content={"error": "Rate limit exceeded", "retry_after": 60},
-                    headers={"Retry-After": "60"},
+                    content={"error": "Rate limit exceeded", "retry_after": 60, "rate_key": rate_key},
+                    headers={"Retry-After": "60", "X-RateLimit-Key": rate_key},
                 )
 
         start = time.monotonic()
@@ -302,6 +327,86 @@ def create_app(
         response.headers["X-Response-Time"] = f"{elapsed_ms:.1f}ms"
         response.headers["X-Request-Id"] = f"{id(request):x}"
         return response
+
+    # === Auth Middleware ===
+
+    _PUBLIC_PREFIXES = ("/health", "/ready", "/docs", "/redoc", "/openapi")
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        """Validate API keys and attach AuthContext to request.state.
+
+        Skips public endpoints (/, /health, /ready, /docs, /redoc, /openapi).
+        Falls back to single-key legacy mode or open mode when no keys exist.
+        """
+        path = request.url.path
+
+        # Public endpoints bypass auth entirely
+        if path == "/" or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+            return await call_next(request)
+
+        # --- Extract Bearer token ---
+        auth_header = request.headers.get("authorization", "")
+        token: Optional[str] = None
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+
+        auth_ctx: Optional[AuthContext] = None
+
+        # --- 1. Try multi-key validation ---
+        if token and token.startswith("ak_") and key_manager.has_keys():
+            auth_ctx = key_manager.validate(token)
+
+        # --- 2. Legacy single-key mode ---
+        if auth_ctx is None and api_key and token == api_key:
+            auth_ctx = AuthContext(
+                key_id="legacy",
+                agent_name="legacy",
+                tenant_id="default",
+                scopes=["read", "write", "admin"],
+                rate_limit_rpm=rate_limit_rpm,
+            )
+
+        # --- 3. Open mode (no auth configured) ---
+        if auth_ctx is None:
+            if api_key or key_manager.has_keys():
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid or missing API key"},
+                )
+            # No keys anywhere → open access
+            auth_ctx = AuthContext(
+                key_id="open",
+                agent_name="anonymous",
+                tenant_id="default",
+                scopes=["read", "write", "admin"],
+                rate_limit_rpm=rate_limit_rpm,
+            )
+
+        # --- 4. Scope checking ---
+        if path.startswith("/auth/"):
+            if "admin" not in auth_ctx.scopes:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Admin scope required for /auth/* endpoints"},
+                )
+        elif request.method in ("POST", "PATCH", "PUT", "DELETE"):
+            if "write" not in auth_ctx.scopes and "admin" not in auth_ctx.scopes:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Write scope required for mutations"},
+                )
+        elif request.method in ("GET", "HEAD"):
+            if "read" not in auth_ctx.scopes and "admin" not in auth_ctx.scopes:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Read scope required"},
+                )
+
+        request.state.auth = auth_ctx
+        request.state.tenant_id = auth_ctx.tenant_id
+
+        return await call_next(request)
 
     # === Root & Health Routes ===
 
@@ -416,12 +521,12 @@ def create_app(
     @app.post("/memories", tags=["memories"])
     async def store_memory(
         req: StoreRequest,
+        request: Request,
         authorization: Optional[str] = Header(None),
-        x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
     ):
         await verify_api_key(authorization)
         mem = get_memory()
-        tenant = x_tenant_id or "default"
+        tenant = getattr(request.state, "tenant_id", "default")
         result = mem.store(
             req.content, topic=req.topic, importance=req.importance,
             entities=req.entities, metadata=req.metadata,
@@ -495,8 +600,8 @@ def create_app(
     @app.post("/search", tags=["search"])
     async def search_memories(
         req: SearchRequest,
+        request: Request,
         authorization: Optional[str] = Header(None),
-        x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
     ):
         await verify_api_key(authorization)
         t0 = time.monotonic()
@@ -521,9 +626,9 @@ def create_app(
         if req.memory_type:
             results = [r for r in results if r.get("topic") == req.memory_type]
 
-        # Apply tenant filter
-        tenant = x_tenant_id
-        if tenant:
+        # Apply tenant filter (derived from API key, not header)
+        tenant = getattr(request.state, "tenant_id", None)
+        if tenant and tenant != "default":
             results = [r for r in results if r.get("tenant_id", "default") == tenant]
 
         latency_ms = (time.monotonic() - t0) * 1000
@@ -1016,13 +1121,13 @@ def create_app(
     @app.post("/import", tags=["data"])
     async def import_memories(
         memories: List[StoreRequest],
+        request: Request,
         authorization: Optional[str] = Header(None),
-        x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
     ):
         """Import multiple memories at once."""
         await verify_api_key(authorization)
         mem = get_memory()
-        tenant = x_tenant_id or "default"
+        tenant = getattr(request.state, "tenant_id", "default")
         results = [
             mem.store(
                 m.content, topic=m.topic, importance=m.importance,
@@ -1057,10 +1162,10 @@ def create_app(
         @v1.post("/memories", tags=["v1"])
         async def v1_store_memory(
             req: StoreRequest,
+            request: Request,
             authorization: Optional[str] = Header(None),
-            x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
         ):
-            return await store_memory(req, authorization, x_tenant_id)
+            return await store_memory(req, request, authorization)
 
         @v1.get("/memories/{memory_id}", tags=["v1"])
         async def v1_get_memory(memory_id: str, authorization: Optional[str] = Header(None)):
@@ -1073,10 +1178,10 @@ def create_app(
         @v1.post("/search", tags=["v1"])
         async def v1_search(
             req: SearchRequest,
+            request: Request,
             authorization: Optional[str] = Header(None),
-            x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
         ):
-            return await search_memories(req, authorization, x_tenant_id)
+            return await search_memories(req, request, authorization)
 
         @v1.post("/extract", tags=["v1"])
         async def v1_extract(req: ExtractRequest, authorization: Optional[str] = Header(None)):
@@ -1088,8 +1193,56 @@ def create_app(
 
         app.include_router(v1)
 
-    # === Graceful Shutdown ===
+    # === Auth Key Management Routes ===
 
+    @app.post("/auth/keys", tags=["auth"])
+    async def create_api_key(req: CreateKeyRequest, request: Request):
+        """Create a new API key (requires admin scope or open mode)."""
+        result = key_manager.create_key(
+            agent_name=req.agent_name,
+            tenant_id=req.tenant_id,
+            scopes=req.scopes,
+            rate_limit_rpm=req.rate_limit_rpm,
+            expires_in_seconds=req.expires_in_seconds,
+        )
+        return result
+
+    @app.get("/auth/keys", tags=["auth"])
+    async def list_api_keys():
+        """List all API keys (requires admin scope)."""
+        return {"keys": key_manager.list_keys()}
+
+    @app.delete("/auth/keys/{key_id}", tags=["auth"])
+    async def revoke_api_key(key_id: str):
+        """Revoke an API key by id (requires admin scope)."""
+        success = key_manager.revoke(key_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Key not found or already revoked")
+        return {"revoked": True, "id": key_id}
+
+    @app.post("/auth/keys/{key_id}/rotate", tags=["auth"])
+    async def rotate_api_key(key_id: str):
+        """Rotate an API key: revoke old, create new with same settings (requires admin scope)."""
+        result = key_manager.rotate(key_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Key not found or already revoked")
+        return result
+    # === Dashboard (Web Console) ===
+
+    try:
+        from arriadne.dashboard import router as dashboard_router
+        from starlette.staticfiles import StaticFiles as StarletteStaticFiles
+        from pathlib import Path
+
+        _dash_static = Path(__file__).parent / "dashboard" / "static"
+        if _dash_static.exists():
+            app.include_router(dashboard_router)
+            app.mount("/dashboard/static", StarletteStaticFiles(directory=str(_dash_static)), name="dashboard-static")
+    except ImportError:
+        pass
+
+    # === Graceful Shutdown ===
+    
     @app.on_event("shutdown")
     async def shutdown_event():
         """Save FAISS index and close DB on shutdown."""

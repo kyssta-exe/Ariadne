@@ -10,7 +10,9 @@ Production-ready HTTP client for the Ariadne REST API with:
 - Local mode (direct AriadneDB access)
 - Remote mode (HTTP API)
 - Auto-detect mode (local if same process, remote if URL provided)
-- Multi-tenancy (X-Tenant-ID header)
+- Multi-tenancy (X-Tenant-ID header or API key-based tenant)
+- API key authentication (Bearer token)
+- Key management (create, list, revoke, rotate)
 - Specific exception classes for error handling
 - Batch operations
 - Context manager support
@@ -23,6 +25,16 @@ Usage:
     result = client.remember("Paris is the capital of France")
     results = client.recall("capital of France", limit=5)
 
+    # API key authentication
+    client = AriadneClient("http://localhost:8899", api_key="your-api-key")
+    result = client.remember("Authenticated memory")
+
+    # Key management
+    new_key = client.create_key(name="my-app", scopes=["read", "write"])
+    keys = client.list_keys()
+    client.revoke_key(key_id="key_123")
+    rotated = client.rotate_key(key_id="key_123")
+
     # Local mode (direct DB access)
     client = AriadneClient(local_db="/path/to/memory.db")
     result = client.remember("Paris is the capital of France")
@@ -34,7 +46,7 @@ Usage:
     async with AriadneClientAsync("http://localhost:8899") as client:
         results = await client.recall("capital of France")
 
-    # Multi-tenancy
+    # Multi-tenancy (via header - for token auth without API keys)
     client = AriadneClient("http://localhost:8899", tenant_id="team_alpha")
     client.remember("Team secret memory")  # automatically tagged with tenant
 """
@@ -168,7 +180,10 @@ class AriadneClient:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        if self._tenant_id:
+            # When using API key auth, tenant is derived from the key
+            # Don't send X-Tenant-ID header
+        elif self._tenant_id:
+            # Only send tenant header when not using API key auth
             headers["X-Tenant-ID"] = self._tenant_id
         return headers
 
@@ -636,6 +651,85 @@ class AriadneClient:
         """Get timeline for a subject."""
         return self._request("GET", f"/temporal/timeline/{subject}")
 
+    # === API Key Management ===
+
+    def create_key(
+        self,
+        name: str,
+        scopes: Optional[List[str]] = None,
+        expires_in_days: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new API key.
+
+        Args:
+            name: Human-readable name for the key
+            scopes: List of allowed scopes (e.g., ["read", "write", "admin"])
+            expires_in_days: Number of days until key expires (None = no expiry)
+            metadata: Optional metadata to attach to the key
+
+        Returns:
+            Dict with key details including the secret (shown once)
+
+        Example:
+            result = client.create_key(name="my-app", scopes=["read", "write"])
+            secret = result["secret"]  # Save this - it won't be shown again
+        """
+        if self._local_mode:
+            raise AriadneError("Key management is not available in local mode")
+        data: Dict[str, Any] = {"name": name}
+        if scopes:
+            data["scopes"] = scopes
+        if expires_in_days is not None:
+            data["expires_in_days"] = expires_in_days
+        if metadata:
+            data["metadata"] = metadata
+        return self._request("POST", "/keys", data)
+
+    def list_keys(self, include_revoked: bool = False) -> Dict[str, Any]:
+        """
+        List all API keys.
+
+        Args:
+            include_revoked: If True, include revoked keys in results
+
+        Returns:
+            Dict with list of key metadata (secrets are never returned)
+        """
+        if self._local_mode:
+            raise AriadneError("Key management is not available in local mode")
+        params = f"?include_revoked={str(include_revoked).lower()}"
+        return self._request("GET", f"/keys{params}")
+
+    def revoke_key(self, key_id: str) -> Dict[str, Any]:
+        """
+        Revoke an API key.
+
+        Args:
+            key_id: The ID of the key to revoke
+
+        Returns:
+            Dict with revocation status
+        """
+        if self._local_mode:
+            raise AriadneError("Key management is not available in local mode")
+        return self._request("DELETE", f"/keys/{key_id}")
+
+    def rotate_key(self, key_id: str) -> Dict[str, Any]:
+        """
+        Rotate an API key (generates a new secret, invalidates the old one).
+
+        Args:
+            key_id: The ID of the key to rotate
+
+        Returns:
+            Dict with new key details including the new secret (shown once)
+        """
+        if self._local_mode:
+            raise AriadneError("Key management is not available in local mode")
+        return self._request("POST", f"/keys/{key_id}/rotate")
+
     # === Close / Context Manager ===
 
     def close(self) -> None:
@@ -655,7 +749,8 @@ class AriadneClient:
 
     def __repr__(self) -> str:
         mode = "local" if self._local_mode else "remote"
-        return f"AriadneClient(mode={mode}, url={self._base_url})"
+        auth = "api_key" if self._api_key else "none"
+        return f"AriadneClient(mode={mode}, url={self._base_url}, auth={auth})"
 
 
 # === Async Client ===
@@ -696,7 +791,10 @@ class AriadneClientAsync:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        if self._tenant_id:
+            # When using API key auth, tenant is derived from the key
+            # Don't send X-Tenant-ID header
+        elif self._tenant_id:
+            # Only send tenant header when not using API key auth
             headers["X-Tenant-ID"] = self._tenant_id
         return headers
 
@@ -884,6 +982,73 @@ class AriadneClientAsync:
     async def rank_memories(self, limit: int = 10) -> Dict[str, Any]:
         return await self._request("GET", f"/memories/ranked?limit={limit}")
 
+    # === API Key Management ===
+
+    async def create_key(
+        self,
+        name: str,
+        scopes: Optional[List[str]] = None,
+        expires_in_days: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new API key.
+
+        Args:
+            name: Human-readable name for the key
+            scopes: List of allowed scopes (e.g., ["read", "write", "admin"])
+            expires_in_days: Number of days until key expires (None = no expiry)
+            metadata: Optional metadata to attach to the key
+
+        Returns:
+            Dict with key details including the secret (shown once)
+        """
+        data: Dict[str, Any] = {"name": name}
+        if scopes:
+            data["scopes"] = scopes
+        if expires_in_days is not None:
+            data["expires_in_days"] = expires_in_days
+        if metadata:
+            data["metadata"] = metadata
+        return await self._request("POST", "/keys", data)
+
+    async def list_keys(self, include_revoked: bool = False) -> Dict[str, Any]:
+        """
+        List all API keys.
+
+        Args:
+            include_revoked: If True, include revoked keys in results
+
+        Returns:
+            Dict with list of key metadata (secrets are never returned)
+        """
+        params = f"?include_revoked={str(include_revoked).lower()}"
+        return await self._request("GET", f"/keys{params}")
+
+    async def revoke_key(self, key_id: str) -> Dict[str, Any]:
+        """
+        Revoke an API key.
+
+        Args:
+            key_id: The ID of the key to revoke
+
+        Returns:
+            Dict with revocation status
+        """
+        return await self._request("DELETE", f"/keys/{key_id}")
+
+    async def rotate_key(self, key_id: str) -> Dict[str, Any]:
+        """
+        Rotate an API key (generates a new secret, invalidates the old one).
+
+        Args:
+            key_id: The ID of the key to rotate
+
+        Returns:
+            Dict with new key details including the new secret (shown once)
+        """
+        return await self._request("POST", f"/keys/{key_id}/rotate")
+
     # === Close / Context Manager ===
 
     async def close(self) -> None:
@@ -898,4 +1063,5 @@ class AriadneClientAsync:
         await self.close()
 
     def __repr__(self) -> str:
-        return f"AriadneClientAsync(url={self._base_url})"
+        auth = "api_key" if self._api_key else "none"
+        return f"AriadneClientAsync(url={self._base_url}, auth={auth})"

@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ariadne Console</title>
+  <!-- Pico CSS (classless) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@0.263.1/dist/umd/lucide.min.js"></script>
+  <!-- vis-network for graph -->
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <!-- Alpine.js -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/dashboard/static/css/style.css">
+</head>
+<body x-data="app()" x-init="init()" :class="{ 'sidebar-open': sidebarOpen }">
+
+  <!-- Auth Gate -->
+  <template x-if="!authenticated">
+    <div class="auth-gate">
+      <div class="auth-card">
+        <h1><span class="logo-icon">◉</span> Ariadne Console</h1>
+        <p class="subtitle">Connect to your memory server</p>
+        <form @submit.prevent="login()">
+          <label for="server-url">Server URL</label>
+          <input type="url" id="server-url" x-model="serverUrl" placeholder="http://localhost:8899" required>
+          <label for="api-key">API Key</label>
+          <input type="password" id="api-key" x-model="apiKey" placeholder="ak_..." required>
+          <button type="submit" :disabled="loading">
+            <span x-show="!loading">Connect</span>
+            <span x-show="loading">Connecting...</span>
+          </button>
+          <p class="error" x-show="authError" x-text="authError"></p>
+        </form>
+        <p class="hint">Or leave blank for open access (no auth configured)</p>
+      </div>
+    </div>
+  </template>
+
+  <!-- Main App -->
+  <template x-if="authenticated">
+    <div class="app-layout">
+      <!-- Sidebar -->
+      <nav class="sidebar" :class="{ collapsed: !sidebarOpen }">
+        <div class="sidebar-header">
+          <span class="logo-icon">◉</span>
+          <span class="logo-text" x-show="sidebarOpen">Ariadne</span>
+          <button class="sidebar-toggle" @click="sidebarOpen = !sidebarOpen">
+            <i data-lucide="panel-left"></i>
+          </button>
+        </div>
+        <ul class="nav-links">
+          <li :class="{ active: page === 'dashboard' }">
+            <a @click.prevent="page = 'dashboard'" href="#">
+              <i data-lucide="layout-dashboard"></i>
+              <span x-show="sidebarOpen">Dashboard</span>
+            </a>
+          </li>
+          <li :class="{ active: page === 'memories' }">
+            <a @click.prevent="page = 'memories'" href="#">
+              <i data-lucide="brain"></i>
+              <span x-show="sidebarOpen">Memories</span>
+            </a>
+          </li>
+          <li :class="{ active: page === 'graph' }">
+            <a @click.prevent="page = 'graph'" href="#">
+              <i data-lucide="git-branch"></i>
+              <span x-show="sidebarOpen">Graph</span>
+            </a>
+          </li>
+          <li :class="{ active: page === 'search' }">
+            <a @click.prevent="page = 'search'" href="#">
+              <i data-lucide="search"></i>
+              <span x-show="sidebarOpen">Search</span>
+            </a>
+          </li>
+          <li :class="{ active: page === 'lifecycle' }">
+            <a @click.prevent="page = 'lifecycle'" href="#">
+              <i data-lucide="refresh-cw"></i>
+              <span x-show="sidebarOpen">Lifecycle</span>
+            </a>
+          </li>
+          <li :class="{ active: page === 'settings' }">
+            <a @click.prevent="page = 'settings'" href="#">
+              <i data-lucide="settings"></i>
+              <span x-show="sidebarOpen">Settings</span>
+            </a>
+          </li>
+        </ul>
+        <div class="sidebar-footer" x-show="sidebarOpen">
+          <small x-text="stats.memories + ' memories'"></small>
+        </div>
+      </nav>
+
+      <!-- Main Content -->
+      <main class="main-content">
+        <!-- Top Bar -->
+        <header class="topbar">
+          <div class="search-global">
+            <i data-lucide="search"></i>
+            <input type="text" placeholder="Quick search..." x-model="quickSearch"
+              @keyup.enter="performQuickSearch()" @keyup.escape="quickSearch = ''">
+          </div>
+          <div class="topbar-actions">
+            <span class="status-badge" :class="healthStatus === 'ok' ? 'healthy' : 'unhealthy'">
+              <span class="dot"></span>
+              <span x-text="healthStatus"></span>
+            </span>
+            <button class="btn-icon" @click="refresh()" title="Refresh">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+            <button class="btn-icon" @click="logout()" title="Disconnect">
+              <i data-lucide="log-out"></i>
+            </button>
+          </div>
+        </header>
+
+        <!-- Page: Dashboard -->
+        <section class="page" x-show="page === 'dashboard'" x-transition>
+          <h2>Dashboard</h2>
+          <div class="stat-grid">
+            <div class="stat-card">
+              <div class="stat-icon"><i data-lucide="brain"></i></div>
+              <div class="stat-value" x-text="stats.memories || 0"></div>
+              <div class="stat-label">Memories</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon"><i data-lucide="network"></i></div>
+              <div class="stat-value" x-text="stats.entities || 0"></div>
+              <div class="stat-label">Entities</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon"><i data-lucide="git-merge"></i></div>
+              <div class="stat-value" x-text="stats.edges || 0"></div>
+              <div class="stat-label">Edges</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon"><i data-lucide="zap"></i></div>
+              <div class="stat-value" x-text="(stats.avg_latency || 0) + 'ms'"></div>
+              <div class="stat-label">Avg Search</div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Lifecycle Distribution</h3>
+              <canvas id="lifecycleChart" width="400" height="200"></canvas>
+            </div>
+            <div class="card">
+              <h3>Memory Types</h3>
+              <canvas id="typesChart" width="400" height="200"></canvas>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Recent Activity</h3>
+            <div class="activity-feed">
+              <template x-for="item in activity" :key="item.id">
+                <div class="activity-item">
+                  <span class="activity-icon" x-text="item.icon"></span>
+                  <span class="activity-text" x-text="item.text"></span>
+                  <span class="activity-time" x-text="item.time"></span>
+                </div>
+              </template>
+              <p x-show="activity.length === 0" class="empty-state">No recent activity</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page: Memories -->
+        <section class="page" x-show="page === 'memories'" x-transition>
+          <h2>Memory Browser</h2>
+          <div class="toolbar">
+            <input type="text" placeholder="Search memories..." x-model="memorySearch"
+              @keyup.enter="searchMemories()" class="search-input">
+            <select x-model="memoryFilter.type">
+              <option value="">All Types</option>
+              <option value="semantic">Semantic</option>
+              <option value="episodic">Episodic</option>
+              <option value="procedural">Procedural</option>
+            </select>
+            <select x-model="memoryFilter.tier">
+              <option value="">All Tiers</option>
+              <option value="1">Hot</option>
+              <option value="2">Warm</option>
+              <option value="3">Cold</option>
+            </select>
+            <button @click="searchMemories()" class="primary">Search</button>
+            <button @click="showNewMemory = true" class="success">+ New</button>
+          </div>
+          <div class="memory-list">
+            <template x-for="mem in memories" :key="mem.id">
+              <div class="memory-item" @click="selectMemory(mem)"
+                :class="{ selected: selectedMemory?.id === mem.id }">
+                <div class="memory-header">
+                  <span class="memory-tier" :class="'tier-' + (mem.tier || 'warm')"></span>
+                  <span class="memory-id" x-text="'#' + mem.id"></span>
+                  <span class="memory-type" x-text="mem.memory_type || 'semantic'"></span>
+                  <span class="memory-importance" x-text="'★' + (mem.importance || 5)"></span>
+                </div>
+                <p class="memory-content" x-text="mem.content.substring(0, 120)"></p>
+                <div class="memory-meta">
+                  <span x-text="mem.topic || 'general'"></span>
+                  <span x-text="mem.age || ''"></span>
+                </div>
+              </div>
+            </template>
+            <p x-show="memories.length === 0 && !loading" class="empty-state">
+              No memories found. Try a different search.
+            </p>
+          </div>
+          <!-- Memory Detail Panel -->
+          <div class="detail-panel" x-show="selectedMemory" x-transition>
+            <div class="detail-header">
+              <h3 x-text="'Memory #' + (selectedMemory?.id || '')"></h3>
+              <button @click="selectedMemory = null" class="btn-icon"><i data-lucide="x"></i></button>
+            </div>
+            <div class="detail-body" x-show="selectedMemory">
+              <pre x-text="JSON.stringify(selectedMemory, null, 2)"></pre>
+            </div>
+            <div class="detail-actions">
+              <button @click="deleteMemory(selectedMemory?.id)" class="danger">Delete</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page: Graph -->
+        <section class="page" x-show="page === 'graph'" x-transition>
+          <h2>Knowledge Graph</h2>
+          <div class="toolbar">
+            <button @click="loadGraph()" class="primary">Load Graph</button>
+            <button @click="graphPhysics = !graphPhysics" x-text="graphPhysics ? 'Stabilize' : 'Unfreeze'"></button>
+            <span class="muted" x-text="graphNodeCount + ' nodes, ' + graphEdgeCount + ' edges'"></span>
+          </div>
+          <div class="graph-container" id="graphContainer"></div>
+        </section>
+
+        <!-- Page: Search -->
+        <section class="page" x-show="page === 'search'" x-transition>
+          <h2>Search</h2>
+          <div class="toolbar">
+            <input type="text" placeholder="Enter search query..." x-model="searchQuery"
+              @keyup.enter="performSearch()" class="search-input wide">
+            <select x-model="searchMode">
+              <option value="hybrid">Hybrid</option>
+              <option value="vector">Vector Only</option>
+              <option value="fts">Text Only</option>
+            </select>
+            <button @click="performSearch()" class="primary">Search</button>
+          </div>
+          <div class="search-results">
+            <template x-for="res in searchResults" :key="res.id">
+              <div class="search-result">
+                <div class="result-header">
+                  <span class="result-score" x-text="(res.score * 100).toFixed(1) + '%'"></span>
+                  <span class="result-id" x-text="'#' + res.id"></span>
+                  <span class="result-type" x-text="res.memory_type || 'semantic'"></span>
+                </div>
+                <p class="result-content" x-text="res.content"></p>
+                <div class="result-meta">
+                  <span x-text="'Topic: ' + (res.topic || 'general')"></span>
+                  <span x-text="'Importance: ' + (res.importance || 5)"></span>
+                  <span x-text="'Retention: ' + ((res.retention_strength || 0.5) * 100).toFixed(0) + '%'"></span>
+                </div>
+              </div>
+            </template>
+            <p x-show="searchResults.length === 0 && searchSearched" class="empty-state">
+              No results found.
+            </p>
+          </div>
+        </section>
+
+        <!-- Page: Lifecycle -->
+        <section class="page" x-show="page === 'lifecycle'" x-transition>
+          <h2>Memory Lifecycle</h2>
+          <div class="stat-grid">
+            <div class="stat-card hot">
+              <div class="stat-value" x-text="lifecycle.hot || 0"></div>
+              <div class="stat-label">Hot (Tier 1)</div>
+            </div>
+            <div class="stat-card warm">
+              <div class="stat-value" x-text="lifecycle.warm || 0"></div>
+              <div class="stat-label">Warm (Tier 2)</div>
+            </div>
+            <div class="stat-card cold">
+              <div class="stat-value" x-text="lifecycle.cold || 0"></div>
+              <div class="stat-label">Cold (Tier 3)</div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Retention Curve</h3>
+            <canvas id="retentionChart" width="600" height="300"></canvas>
+          </div>
+          <div class="card">
+            <h3>Prune Candidates</h3>
+            <button @click="previewPrune()" class="secondary">Preview</button>
+            <div class="prune-list" x-show="prunePreview.length > 0">
+              <template x-for="mem in prunePreview" :key="mem.id">
+                <div class="prune-item">
+                  <span x-text="'#' + mem.id"></span>
+                  <span x-text="mem.content.substring(0, 80)"></span>
+                  <span x-text="'Retention: ' + ((mem.retention_strength || 0) * 100).toFixed(0) + '%'"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page: Settings -->
+        <section class="page" x-show="page === 'settings'" x-transition>
+          <h2>Settings</h2>
+          <div class="card">
+            <h3>Connection</h3>
+            <p><strong>Server:</strong> <span x-text="serverUrl"></span></p>
+            <p><strong>Status:</strong> <span x-text="healthStatus"></span></p>
+          </div>
+          <div class="card">
+            <h3>API Keys</h3>
+            <div class="toolbar">
+              <button @click="loadKeys()" class="secondary">Load Keys</button>
+              <button @click="showNewKey = true" class="success">+ New Key</button>
+            </div>
+            <div class="key-list">
+              <template x-for="key in apiKeys" :key="key.id">
+                <div class="key-item">
+                  <span class="key-name" x-text="key.agent_name"></span>
+                  <span class="key-prefix" x-text="key.key_prefix || '••••'"></span>
+                  <span class="key-scopes" x-text="key.scopes?.join(', ')"></span>
+                  <button @click="revokeKey(key.id)" class="danger small">Revoke</button>
+                </div>
+              </template>
+            </div>
+            <!-- New Key Form -->
+            <div class="modal" x-show="showNewKey" x-transition>
+              <form @submit.prevent="createKey()">
+                <label>Agent Name</label>
+                <input type="text" x-model="newKeyForm.agent_name" required>
+                <label>Tenant ID</label>
+                <input type="text" x-model="newKeyForm.tenant_id" value="default">
+                <label>Scopes</label>
+                <div class="checkbox-group">
+                  <label><input type="checkbox" value="read" x-model="newKeyForm.scopes"> Read</label>
+                  <label><input type="checkbox" value="write" x-model="newKeyForm.scopes"> Write</label>
+                  <label><input type="checkbox" value="admin" x-model="newKeyForm.scopes"> Admin</label>
+                </div>
+                <div class="modal-actions">
+                  <button type="submit" class="primary">Create</button>
+                  <button type="button" @click="showNewKey = false" class="secondary">Cancel</button>
+                </div>
+                <div class="new-key-result" x-show="newKeyResult">
+                  <p class="key-display" x-text="newKeyResult?.key"></p>
+                  <p class="warning">Copy this key now — it won't be shown again.</p>
+                </div>
+              </form>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Data Management</h3>
+            <div class="toolbar">
+              <button @click="exportData()" class="secondary">Export</button>
+              <button @click="triggerConsolidation()" class="secondary">Consolidate</button>
+              <button @click="triggerLifecycle()" class="secondary">Run Lifecycle</button>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </template>
+
+  <!-- New Memory Modal -->
+  <div class="modal-overlay" x-show="showNewMemory" x-transition @click.self="showNewMemory = false">
+    <div class="modal">
+      <h3>New Memory</h3>
+      <form @submit.prevent="createMemory()">
+        <label>Content</label>
+        <textarea x-model="newMemory.content" rows="4" required></textarea>
+        <label>Topic</label>
+        <input type="text" x-model="newMemory.topic" placeholder="general">
+        <label>Importance (1-10)</label>
+        <input type="number" x-model.number="newMemory.importance" min="1" max="10" value="5">
+        <div class="modal-actions">
+          <button type="submit" class="primary">Store</button>
+          <button type="button" @click="showNewMemory = false" class="secondary">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" x-show="loading">
+    <div class="spinner"></div>
+  </div>
+
+  <script src="/dashboard/static/js/api.js"></script>
+  <script src="/dashboard/static/js/app.js"></script>
+  <script src="/dashboard/static/js/graph.js"></script>
+  <script src="/dashboard/static/js/charts.js"></script>
+</body>
+</html>

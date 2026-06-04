@@ -47,8 +47,14 @@ export default defineConfig({
           { text: 'Introduction', link: '/guide/' },
           { text: 'Installation', link: '/guide/installation' },
           { text: 'Quick Start', link: '/guide/quick-start' },
-          { text: 'Setup with Hermes', link: '/guide/hermes' },
           { text: 'Configuration', link: '/guide/configuration' },
+        ],
+      },
+      {
+        text: 'Agent Integration',
+        items: [
+          { text: 'Setup with Hermes', link: '/guide/hermes' },
+          { text: 'Integration Guide', link: '/guide/integration' },
         ],
       },
       {
@@ -71,6 +77,7 @@ export default defineConfig({
           { text: 'Graph Visualization', link: '/guide/visualization' },
           { text: 'REST API', link: '/guide/rest-api' },
           { text: 'Observability', link: '/guide/observability' },
+          { text: 'Dashboard Design', link: '/guide/dashboard-design' },
         ],
       },
       {
