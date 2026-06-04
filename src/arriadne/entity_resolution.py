@@ -61,6 +61,7 @@ class EntityExtractor:
 
     # Generic words to exclude from entity lists
     GENERIC_WORDS = frozenset({
+        # Articles, pronouns, prepositions
         "the", "a", "an", "this", "that", "it", "he", "she", "they",
         "we", "you", "i", "me", "him", "her", "us", "them",
         "my", "your", "his", "its", "our", "their",
@@ -69,10 +70,30 @@ class EntityExtractor:
         "will", "would", "could", "should", "may", "might", "can",
         "not", "no", "yes", "ok", "sure", "thanks", "thank",
         "please", "hello", "hi", "hey", "bye", "goodbye",
+        # Adverbs, fillers
         "very", "really", "just", "also", "too", "much", "more",
+        "most", "some", "any", "all", "each", "every", "few",
+        # Generic nouns
         "thing", "things", "stuff", "way", "time", "day", "days",
         "new", "good", "bad", "old", "first", "last", "next",
         "work", "info", "details", "something", "everything", "anything",
+        # Verbs that appear in fragments
+        "use", "using", "used", "want", "need", "try", "going",
+        "make", "made", "take", "took", "give", "gave", "get", "got",
+        "start", "started", "finish", "finished", "run", "running",
+        "add", "added", "remove", "removed", "fix", "fixed",
+        "set", "put", "let", "keep", "see", "look", "find",
+        "know", "think", "say", "said", "tell", "told",
+        "come", "came", "go", "went", "put", "turn",
+        # Common fragment starters
+        "from", "with", "into", "about", "before", "after",
+        "when", "where", "how", "what", "which", "who",
+        "there", "here", "then", "than", "now", "well",
+        "so", "but", "and", "or", "if", "because",
+        "while", "during", "until", "since", "though",
+        "also", "still", "already", "yet", "ever", "never",
+        "often", "sometimes", "usually", "always",
+        "like", "want", "need", "make", "do",
     })
 
     def __init__(self):
@@ -153,47 +174,81 @@ class EntityExtractor:
         return mentions
 
     def _extract_regex(self, text: str) -> List[EntityMention]:
-        """Extract using regex heuristics."""
+        """Extract using regex heuristics — conservative, high-precision only."""
         mentions = []
 
-        # Pattern 1: Capitalized multi-word sequences (potential proper nouns)
-        for match in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", text):
+        # Pattern 1: Known tech/tool names (highest confidence)
+        tool_pattern = (
+            r"\b(Python|Java|JavaScript|TypeScript|Rust|Go|Docker|Linux|Ubuntu|Windows|macOS|"
+            r"VS Code|Vim|Emacs|GitHub|GitLab|PostgreSQL|MySQL|Redis|MongoDB|FAISS|ONNX|"
+            r"PyTorch|TensorFlow|spaCy|LangChain|OpenAI|Anthropic|Claude|GPT|Gemini|"
+            r"Llama|Mistral|NixOS|Debian|CentOS|Node\.js|React|Vue|Angular|Svelte|"
+            r"FastAPI|Django|Flask|Express|Nginx|Apache|Kubernetes|Docker|Podman|"
+            r"Hermes|Ariadne|Mnemosyne|Mem0|Zep|ChromaDB|Qdrant|Pinecone|"
+            r"SQLite|Postgres|MongoDB|Elasticsearch|Meilisearch|Typesense|"
+            r"OpenRouter|Ollama|vLLM|llama\.cpp|GGUF|GPTQ|AWQ)\b"
+        )
+        for match in re.finditer(tool_pattern, text, re.IGNORECASE):
+            name = match.group(1).strip()
+            if len(name) >= 2:
+                mentions.append(
+                    EntityMention(
+                        text=name,
+                        start=match.start(),
+                        end=match.end(),
+                        entity_type="TOOL",
+                        confidence=0.9,
+                    )
+                )
+
+        # Pattern 2: Capitalized multi-word proper nouns (2-4 words, must be Title Case)
+        # Requires each word to start with uppercase and be >= 3 chars (filters "I", "A", etc.)
+        for match in re.finditer(
+            r"\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){1,3})\b", text
+        ):
+            phrase = match.group(1)
+            words = phrase.split()
+            # Skip if any word is in generic list
+            if any(w.lower() in self.GENERIC_WORDS for w in words):
+                continue
+            # Skip if it looks like a sentence fragment (contains common verbs)
+            fragment_verbs = {
+                "is", "are", "was", "were", "has", "have", "had",
+                "use", "using", "used", "make", "made", "get", "got",
+                "run", "running", "start", "started", "try", "trying",
+                "add", "added", "fix", "fixed", "set", "put", "let",
+                "keep", "see", "look", "find", "want", "need", "go",
+                "went", "come", "came", "take", "took", "give", "gave",
+            }
+            if any(w.lower() in fragment_verbs for w in words):
+                continue
             mentions.append(
                 EntityMention(
-                    text=match.group(1),
+                    text=phrase,
                     start=match.start(),
                     end=match.end(),
-                    entity_type="PERSON",
+                    entity_type="PERSON" if len(words) <= 3 else "ORG",
+                    confidence=0.7,
+                )
+            )
+
+        # Pattern 3: ALL CAPS abbreviations (2-6 chars, like "AWS", "API", "CLI")
+        for match in re.finditer(r"\b([A-Z]{2,6})\b", text):
+            abbr = match.group(1)
+            # Skip common English words that happen to be uppercase
+            if abbr in {"THE", "AND", "BUT", "FOR", "NOT", "YOU", "ALL", "CAN", "HER", "WAS", "ONE", "OUR", "OUT", "HAS", "HIS", "HOW", "ITS", "MAY", "NEW", "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "LET", "SAY", "SHE", "TOO", "USE", "VS", "OK", "AM", "PM", "UP", "DO", "IF", "GO", "NO", "SO", "BE", "BY", "HE", "ME", "WE", "US"}:
+                continue
+            mentions.append(
+                EntityMention(
+                    text=abbr,
+                    start=match.start(),
+                    end=match.end(),
+                    entity_type="ORG",
                     confidence=0.6,
                 )
             )
 
-        # Pattern 2: Quoted strings
-        for match in re.finditer(r'["\']([^"\']{2,50})["\']', text):
-            mentions.append(
-                EntityMention(
-                    text=match.group(1),
-                    start=match.start(),
-                    end=match.end(),
-                    entity_type="CONCEPT",
-                    confidence=0.5,
-                )
-            )
-
-        # Pattern 3: Known tool/product patterns
-        tool_pattern = r"\b(Python|Java|JavaScript|TypeScript|Rust|Go|Docker|Linux|Ubuntu|Windows|macOS|VS Code|Vim|Emacs|GitHub|GitLab|PostgreSQL|MySQL|Redis|MongoDB|FAISS|ONNX|PyTorch|TensorFlow|spaCy|LangChain|OpenAI|Anthropic|Claude|GPT|Gemini|Llama|Mistral|NixOS|Debian|CentOS)\b"
-        for match in re.finditer(tool_pattern, text, re.IGNORECASE):
-            mentions.append(
-                EntityMention(
-                    text=match.group(1),
-                    start=match.start(),
-                    end=match.end(),
-                    entity_type="TOOL",
-                    confidence=0.8,
-                )
-            )
-
-        # Pattern 4: IP addresses and hostnames
+        # Pattern 4: IP addresses
         for match in re.finditer(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", text):
             mentions.append(
                 EntityMention(
@@ -209,9 +264,11 @@ class EntityExtractor:
 
     def _normalize_name(self, name: str) -> str:
         """Normalize entity name for canonical matching."""
-        # Strip whitespace and normalize casing
         name = name.strip()
-        # Don't lowercase - preserve original casing for proper nouns
+        # Collapse multiple spaces
+        name = re.sub(r"\s+", " ", name)
+        # Strip trailing punctuation
+        name = name.rstrip(",:;.!?")
         return name
 
 

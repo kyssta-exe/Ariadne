@@ -212,7 +212,22 @@ class MemoryLifecycle:
         )
         due_for_pruning = cursor.fetchone()[0]
 
-        # Step 5: Calculate Ebbinghaus retention for each tier
+        # Step 5: Update retention_strength for all active memories
+        try:
+            cursor.execute(
+                "SELECT id, created_at, access_count, importance FROM memories WHERE deleted_at IS NULL"
+            )
+            for row in cursor.fetchall():
+                mem = {"created_at": row[1], "access_count": row[2] or 0, "importance": row[3] or 5}
+                retention = self.get_retention_score(mem)
+                cursor.execute(
+                    "UPDATE memories SET retention_strength = ? WHERE id = ?",
+                    (retention, row[0]),
+                )
+        except Exception:
+            pass  # Column may not exist in older schemas
+
+        # Step 6: Calculate Ebbinghaus retention for each tier
         avg_retention_hot = self._avg_retention_in_tier("hot")
         avg_retention_warm = self._avg_retention_in_tier("warm")
         avg_retention_cold = self._avg_retention_in_tier("cold")

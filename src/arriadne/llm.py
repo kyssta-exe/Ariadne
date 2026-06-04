@@ -606,6 +606,68 @@ class xAIProvider(BaseLLMProvider):
 
 
 # ──────────────────────────────────────────────────────────────
+# Callable Provider (for host agent LLM passthrough)
+# ──────────────────────────────────────────────────────────────
+
+class CallableProvider(BaseLLMProvider):
+    """Wrap any callable as an LLM provider.
+
+    This lets AI agents (Hermes, OpenClaw, etc.) pass their own LLM
+    function directly — no API key needed. Ariadne uses the agent's LLM
+    for extraction, entity resolution, and consolidation.
+
+    The callable receives a list of dicts [{"role": "system"|"user"|"assistant", "content": "..."}]
+    and must return a string (the assistant's response).
+
+    Usage::
+
+        def my_agent_llm(messages):
+            # Call whatever LLM the agent uses
+            return agent.complete(messages)
+
+        ariadne = AriadneMemory(llm_config={"provider": "callable", "callable": my_agent_llm})
+    """
+
+    def __init__(self, fn: Any, name: str = "agent-llm") -> None:
+        if not callable(fn):
+            raise TypeError(f"Expected a callable, got {type(fn).__name__}")
+        self._fn = fn
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def is_available(self) -> bool:
+        return callable(self._fn)
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+    ) -> LLMResponse:
+        import asyncio
+
+        # Convert LLMMessage objects to dicts
+        msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
+
+        # If the callable is sync, run in executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        if asyncio.iscoroutinefunction(self._fn):
+            result = await self._fn(msg_dicts)
+        else:
+            result = await loop.run_in_executor(None, self._fn, msg_dicts)
+
+        return LLMResponse(
+            content=str(result),
+            model=getattr(self, "_model", "callable"),
+            usage={"prompt_tokens": 0, "completion_tokens": 0},
+        )
+
+
+# ──────────────────────────────────────────────────────────────
 # Provider Registry
 # ──────────────────────────────────────────────────────────────
 
@@ -621,6 +683,7 @@ PROVIDER_REGISTRY: Dict[str, type] = {
     "mistral": MistralProvider,
     "xai": xAIProvider,
     "grok": xAIProvider,
+    "callable": CallableProvider,
 }
 
 
@@ -672,6 +735,8 @@ class LLMProvider:
                     kwargs["api_key"] = api_key
                 if model:
                     kwargs["model"] = model
+                if base_url:
+                    kwargs["base_url"] = base_url
                 kwargs["timeout"] = config.get("timeout", 60.0)
             return cls(provider_cls(**kwargs))
 

@@ -298,6 +298,15 @@ class OnnxEmbedding(EmbeddingProvider):
         }
 
     def embed(self, text: str) -> np.ndarray:
+        # LRU cache for single-text embeddings (avoids re-encoding common queries)
+        cache = getattr(self, '_embed_cache', None)
+        if cache is None:
+            import functools
+            self._embed_cache = functools.lru_cache(maxsize=512)(self._embed_uncached)
+            cache = self._embed_cache
+        return cache(text)
+
+    def _embed_uncached(self, text: str) -> np.ndarray:
         return self.embed_batch([text])[0]
 
     def embed_batch(self, texts: list[str]) -> np.ndarray:

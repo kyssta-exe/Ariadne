@@ -46,6 +46,7 @@ class TestLLMProviderRegistry:
         expected = {
             "openai", "anthropic", "ollama", "gemini", "google",
             "cohere", "deepseek", "groq", "mistral", "xai", "grok",
+            "callable",
         }
         assert set(PROVIDER_REGISTRY.keys()) == expected
 

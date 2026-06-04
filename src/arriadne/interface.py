@@ -164,7 +164,52 @@ class AriadneMemory:
                 embedding_provider=self._embedder if self._embedder.name != "keyword" else None,
                 llm_provider=self._get_llm(),
             )
+            # Load existing entities from SQLite
+            self._load_entities_from_db()
         return self._entity_resolver
+
+    def _load_entities_from_db(self):
+        """Load existing entities from SQLite into the resolver."""
+        if not self._entity_resolver:
+            return
+        try:
+            cursor = self._db.conn.execute("SELECT id, name, entity_type FROM entities")
+            for row in cursor.fetchall():
+                eid, name, etype = str(row[0]), row[1], row[2] or "general"
+                from arriadne.entity_resolution import Entity
+                entity = Entity(
+                    id=eid, name=name, entity_type=etype,
+                    canonical_name=name, aliases=[name],
+                    created_at=0.0,
+                )
+                self._entity_resolver._entities[eid] = entity
+                self._entity_resolver._name_index[name.lower()] = name
+        except Exception:
+            pass
+
+    def _persist_entities(self, entities):
+        """Persist resolved entities back to SQLite."""
+        if not entities:
+            return
+        for entity in entities:
+            try:
+                # Check if entity exists in DB
+                row = self._db.conn.execute(
+                    "SELECT id FROM entities WHERE name = ?", (entity.canonical_name,)
+                ).fetchone()
+                if row:
+                    entity_id = int(row[0])
+                else:
+                    cursor = self._db.conn.execute(
+                        "INSERT INTO entities (name, entity_type, created_at) VALUES (?, ?, ?)",
+                        (entity.canonical_name, entity.entity_type, entity.created_at or time.time()),
+                    )
+                    entity_id = cursor.lastrowid
+                    self._db.conn.commit()
+                # Update entity ID in resolver
+                entity.id = str(entity_id)
+            except Exception:
+                pass
 
     def _get_temporal(self):
         """Get or initialize the temporal graph."""
@@ -308,7 +353,8 @@ class AriadneMemory:
             # Auto-resolve entities
             try:
                 resolver = self._get_entity_resolver()
-                resolver.resolve(content, memory_id=str(memory_id))
+                resolved = resolver.resolve(content, memory_id=str(memory_id))
+                self._persist_entities(resolved)
             except Exception:
                 pass
 

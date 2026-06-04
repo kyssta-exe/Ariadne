@@ -362,6 +362,12 @@ class AriadneDB:
             cursor.execute("ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT 'semantic'")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)")
 
+        # Last accessed tracking: add column if missing (migration-safe)
+        try:
+            cursor.execute("SELECT last_accessed_at FROM memories LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE memories ADD COLUMN last_accessed_at REAL")
+
         # FTS5 virtual table
         cursor.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
@@ -1237,9 +1243,15 @@ class AriadneDB:
         for mid in sorted_ids:
             memory = self._read_memory(mid)
             if memory is not None and not memory["is_deleted"]:
+                # Apply retention boost: high-retention memories rank higher
+                retention = memory.get("retention_strength", 1.0) or 1.0
+                fused_scores[mid] *= (0.5 + 0.5 * retention)  # 50-100% of original score
                 memory["score"] = fused_scores[mid]
                 memory["search_type"] = "hybrid"
                 results.append(memory)
+
+        # Re-sort after retention boost
+        results.sort(key=lambda m: m["score"], reverse=True)
         return results
 
     def add_edge(
