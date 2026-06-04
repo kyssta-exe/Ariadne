@@ -911,7 +911,6 @@ class AriadneMemory:
     def recompute_importance(self) -> int:
         """Recompute importance for all memories based on access patterns and category."""
         from arriadne.categories import MemoryCategoryManager
-        import math
 
         manager = MemoryCategoryManager()
         cursor = self._db.conn.execute(
@@ -927,7 +926,6 @@ class AriadneMemory:
             category = row[2] or "semantic"
             access_count = row[3] or 0
             accessed_at = row[4] or row[5]
-            created_at = row[5]
 
             config = manager.get_config(category)
             days_since_access = (now - accessed_at) / 86400.0
