@@ -116,3 +116,26 @@ ariadne stats
 - [Build a knowledge graph](/guide/graph) — entities, relationships, multi-hop traversal
 - [Configure retention](/guide/lifecycle) — Ebbinghaus curves, eviction, consolidation
 - [Set up deduplication](/guide/deduplication) — MinHash thresholds, contradiction detection
+
+---
+
+## Frequently Asked Questions
+
+### How do I install Ariadne?
+```bash
+pip install arriadne
+```
+No system packages, no Docker, no external services.
+
+### What Python version do I need?
+Python 3.10 or later.
+
+### Can I use Ariadne without an embedding model?
+Yes. Without embeddings, you get keyword-only search (FTS5), the knowledge graph, deduplication, and retention modeling.
+
+### How much disk space does Ariadne use?
+About **5MB per 1,000 memories**. Both SQLite and FAISS are compact and auto-managed.
+
+### Can I use Ariadne with multiple agents?
+Yes. Ariadne supports a shared surface database for cross-agent memory sharing.
+

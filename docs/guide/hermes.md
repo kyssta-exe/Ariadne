@@ -162,3 +162,20 @@ hermes restart
 ```
 
 Back up with: `cp -r ~/.hermes/ariadne ~/backup/ariadne-$(date +%Y%m%d)`
+
+---
+
+## Frequently Asked Questions
+
+### Will Ariadne break my existing Hermes setup?
+No. Ariadne uses the same tool names as Mnemosyne. All conversations, cron jobs, and memory references work unchanged.
+
+### Can I switch back to Mnemosyne?
+Yes. Run `hermes config set memory.provider mnemosyne` and restart.
+
+### Does Ariadne work with Hermes cron jobs?
+Yes. Cron jobs using `mnemosyne_remember`/`mnemosyne_recall` work identically.
+
+### How do I know if Ariadne is active?
+Send "Check memory status" to Hermes. If the output shows `"engine": "Ariadne"`, it's working.
+

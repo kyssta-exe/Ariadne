@@ -65,3 +65,23 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 4. **Auto-Deduplication** — MinHash LSH catches near-duplicates at 0.12ms before they enter the system. No more redundant memories.
 
 5. **Knowledge Graph** — Entities and typed relationships with multi-hop BFS traversal. Find connections that vector search alone would miss.
+
+---
+
+## Frequently Asked Questions
+
+### What is Ariadne?
+Ariadne is a local memory system for AI agents. It stores, searches, and manages memories using FAISS vector search, SQLite FTS5 keywords, a knowledge graph, and cognitive retention modeling. No cloud, no API keys, no daemon.
+
+### How fast is Ariadne?
+Ariadne's FAISS vector search returns results in **0.78ms** across 10,000 memories. Hybrid search (vector + keyword + graph) completes in **2.15ms**. This is 196x faster than sqlite-vec.
+
+### Does Ariadne work with Hermes Agent?
+Yes. Ariadne ships as a drop-in plugin for Hermes Agent. Install the plugin, set `memory.provider: ariadne`, restart. All existing tool names and conversations work unchanged.
+
+### What makes Ariadne different from ChromaDB or LanceDB?
+Ariadne combines vector search, keyword search, a knowledge graph, and deduplication in a single library. ChromaDB and LanceDB are vector-only stores.
+
+### Can I migrate from Mnemosyne?
+Yes. Run `ariadne migrate --from mnemosyne`. All memories, graph edges, and metadata transfer automatically.
+

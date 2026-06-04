@@ -204,3 +204,23 @@ hybrid_results = db.hybrid_search(
 db.close()
 ```
 
+
+---
+
+## Frequently Asked Questions
+
+### What is hybrid search?
+Hybrid search combines **vector similarity** (semantic understanding) and **BM25 keyword matching** (exact text match), then merges results using Reciprocal Rank Fusion. 92% recall@10.
+
+### How does Reciprocal Rank Fusion work?
+RRF assigns each result a score based on its rank in both result lists. `score = 1/(k + rank_vector) + 1/(k + rank_keyword)` where k=60.
+
+### When should I use vector search vs keyword search?
+Use **vector** for semantic queries ("how do I deploy this"). Use **keyword** for exact matches ("kubectl apply"). Ariadne's hybrid search runs both automatically.
+
+### Does Ariadne support embeddings?
+Yes. Any embedding model works. Recommended: `sentence-transformers` with `all-MiniLM-L6-v2` for 384-dim vectors. Without embeddings, Ariadne falls back to keyword-only search.
+
+### How fast is search at scale?
+10K memories: **0.78ms** (vector), **2.15ms** (hybrid). 100K memories: **1.8ms** (vector). FAISS auto-upgrades from exact to approximate search.
+
