@@ -22,6 +22,7 @@ export default defineConfig({
           { text: 'Introduction', link: '/guide/' },
           { text: 'Installation', link: '/guide/installation' },
           { text: 'Quick Start', link: '/guide/quick-start' },
+          { text: 'Setup with Hermes', link: '/guide/hermes' },
           { text: 'Configuration', link: '/guide/configuration' },
         ],
       },
