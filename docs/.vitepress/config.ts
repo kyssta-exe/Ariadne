@@ -4,9 +4,7 @@ export default defineConfig({
   base: '/',
   title: 'Ariadne',
   description: 'Next-generation AI memory system — thread through the labyrinth of memories.',
-  head: [
-    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }],
-  ],
+  head: [],
   themeConfig: {
     logo: '/logo.svg',
     siteTitle: 'Ariadne',
