@@ -188,10 +188,3 @@ print(stats["by_type"])
 # {'semantic': 150, 'episodic': 45, 'procedural': 30}
 ```
 
----
-
-<div style="text-align: center; padding: 20px 0;">
-  <a href="https://mantes.net" class="mantes-badge" target="_blank">
-    Powered by <strong>Mantes</strong>
-  </a>
-</div>

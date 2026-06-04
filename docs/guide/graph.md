@@ -201,10 +201,3 @@ result = mem.graph("WebApp", hops=2, edge_type="uses")
 print("Uses relationships:", result["nodes"])
 ```
 
----
-
-<div style="text-align: center; padding: 20px 0;">
-  <a href="https://mantes.net" class="mantes-badge" target="_blank">
-    Powered by <strong>Mantes</strong>
-  </a>
-</div>

@@ -226,10 +226,3 @@ def full_maintenance():
     print(f"Active: {stats['active_memories']}, total: {stats['total_memories']}")
 ```
 
----
-
-<div style="text-align: center; padding: 20px 0;">
-  <a href="https://mantes.net" class="mantes-badge" target="_blank">
-    Powered by <strong>Mantes</strong>
-  </a>
-</div>

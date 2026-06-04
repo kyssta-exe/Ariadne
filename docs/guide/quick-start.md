@@ -1,53 +1,96 @@
 # Quick Start
 
-## 5-Minute Setup
+Get Ariadne running in under 60 seconds.
+
+## Install
+
+```bash
+pip install ariadne sentence-transformers
+```
+
+## Store, Search, Connect
 
 ```python
+from sentence_transformers import SentenceTransformer
 from arriadne import AriadneMemory
-import numpy as np
 
-# Initialize (creates database + FAISS index)
-mem = AriadneMemory("~/.ariadne/memory.db", embedding_dim=384)
+# Load an embedding model (384-dim)
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Store a memory
-result = mem.remember(
+# Initialize Ariadne — creates the SQLite DB and FAISS index
+mem = AriadneMemory(db_path="agent_memory.db", embedding_dim=384)
+
+# ── Store memories ──────────────────────────────────────
+# Each remember() call runs dedup + contradiction detection automatically
+
+mem.remember(
     content="User prefers dark mode in all applications",
-    content_type="semantic",
+    memory_type="semantic",
     importance=0.8,
+    entities=["user", "preferences"],
 )
-print(f"Stored memory {result['memory_id']}")
 
-# Search for memories
-results = mem.recall("dark mode preferences", k=5)
+mem.remember(
+    content="Deploy to production by running: make deploy-prod",
+    memory_type="procedural",
+    importance=0.9,
+    entities=["deployment", "production"],
+)
+
+mem.remember(
+    content="Met with DevOps team to discuss Kubernetes migration",
+    memory_type="episodic",
+    importance=0.6,
+    entities=["DevOps", "Kubernetes"],
+)
+
+# ── Search (hybrid: FTS5 + FAISS + RRF fusion) ─────────
+
+query = "how to deploy"
+query_embedding = model.encode(query).tolist()
+
+results = mem.recall(query, embedding=query_embedding, k=5)
 for r in results:
-    print(f"  [{r['rrf_score']:.4f}] {r['content'][:60]}...")
+    print(f"  [{r['search_type']}] score={r['score']:.4f} | {r['content'][:60]}")
 
-# Build a knowledge graph
-mem.db.add_edge("User", "person", "Hermes", "project", "uses")
-mem.db.add_edge("Hermes", "project", "Ariadne", "component", "replaces")
+# Output:
+#   [hybrid] score=0.0324 | Deploy to production by running: make deploy-prod
+#   [fts]    score=0.0181 | Met with DevOps team to discuss Kubernetes migration
 
-# Traverse the graph
-nodes = mem.graph("User", "person", max_hops=3)
-for node in nodes:
-    print(f"  depth={node['depth']}: {node['name']} ({node['type']})")
+# ── Build a knowledge graph ─────────────────────────────
 
-# Check stats
-print(mem.stats())
+mem.add_edge("WebApp", "API", edge_type="depends_on")
+mem.add_edge("API", "Database", edge_type="depends_on")
+mem.add_edge("Database", "PostgreSQL", edge_type="uses")
+
+# Traverse the dependency chain
+graph = mem.graph("WebApp", hops=3)
+print(graph["nodes"])
+# ['WebApp', 'API', 'Database', 'PostgreSQL']
+
+# ── Check what's in the database ────────────────────────
+
+stats = mem.stats()
+print(f"Active: {stats['active_memories']}, Graph: {stats['total_entities']} entities, {stats['total_edges']} edges")
+# Active: 3, Graph: 7 entities, 3 edges
+
+mem.close()
 ```
 
 ## CLI Usage
 
+Prefer the terminal?
+
 ```bash
-# Initialize database
-ariadne init --db-path ~/.ariadne/memory.db
+# Initialize
+ariadne init --db-path memory.db
 
 # Add memories
 ariadne add "User prefers dark mode" --type semantic --importance 0.8
-ariadne add "VPS has 4 cores 8GB RAM" --type semantic
+ariadne add "Deploy with make deploy-prod" --type procedural --importance 0.9
 
 # Search
-ariadne search "dark mode"
-ariadne search "server configuration" --k 10
+ariadne search "deploy" -k 5
 
 # Stats
 ariadne stats
@@ -55,8 +98,17 @@ ariadne stats
 
 ## What Just Happened
 
-1. **AriadneMemory** opened (or created) a SQLite database and loaded a FAISS index
-2. **remember()** checked for duplicates (content hash + MinHash LSH), then stored the memory with an embedding
-3. **recall()** ran hybrid search: FTS5 keyword search + FAISS vector search, fused with Reciprocal Rank Fusion
-4. **add_edge()** created entities and a typed relationship in the knowledge graph
-5. **graph()** ran BFS traversal via recursive CTE query
+1. **`AriadneMemory()`** opened (or created) a SQLite database in WAL mode and loaded/created a FAISS index
+2. **`remember()`** ran SHA-256 exact dedup, MinHash LSH near-duplicate check, negation-based contradiction detection, stored the memory with an L2-normalized embedding in FAISS, and associated entities in the knowledge graph
+3. **`recall()`** ran hybrid search: FTS5 keyword → FAISS vector → Reciprocal Rank Fusion (merges both ranked lists into one)
+4. **`add_edge()`** upserted entities and created a typed, weighted relationship between them
+5. **`graph()`** ran BFS traversal via SQLite recursive CTE — following edges bidirectionally up to 3 hops
+6. **`close()`** saved the FAISS index to `.faiss` file and closed the SQLite connection
+
+## Next Steps
+
+- [Choose an embedding model](/guide/embeddings) — `all-MiniLM-L6-v2` is a good default
+- [Understand search](/guide/search) — when to use vector vs keyword vs hybrid
+- [Build a knowledge graph](/guide/graph) — entities, relationships, multi-hop traversal
+- [Configure retention](/guide/lifecycle) — Ebbinghaus curves, eviction, consolidation
+- [Set up deduplication](/guide/deduplication) — MinHash thresholds, contradiction detection

@@ -190,10 +190,3 @@ config = AriadneConfig(
 The `embedding_dim` must match your model's output dimension exactly. A mismatch will cause FAISS index errors.
 :::
 
----
-
-<div style="text-align: center; padding: 20px 0;">
-  <a href="https://mantes.net" class="mantes-badge" target="_blank">
-    Powered by <strong>Mantes</strong>
-  </a>
-</div>

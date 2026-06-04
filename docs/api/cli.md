@@ -298,10 +298,3 @@ echo "Server has 4 cores and 8GB RAM" | xargs -I {} ariadne add "{}" --type sema
 ariadne search "server config" -k 3 2>/dev/null | grep "score=" | cut -d'|' -f2
 ```
 
----
-
-<div style="text-align: center; padding: 20px 0;">
-  <a href="https://mantes.net" class="mantes-badge" target="_blank">
-    Powered by <strong>Mantes</strong>
-  </a>
-</div>

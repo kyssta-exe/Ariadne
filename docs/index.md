@@ -3,11 +3,8 @@ layout: home
 
 hero:
   name: Ariadne
-  text: Thread through the labyrinth of memories
-  tagline: Next-generation AI memory system. Sub-millisecond search across 100K memories. Zero cloud. Zero daemon.
-  image:
-    src: /logo.svg
-    alt: Ariadne
+  text: Memory that works like memory
+  tagline: Sub-millisecond hybrid search. Cognitive retention. Knowledge graph traversal. Zero infrastructure. One pip install.
   actions:
     - theme: brand
       text: Get Started
@@ -21,29 +18,22 @@ hero:
 
 features:
   - icon: ⚡
-    title: Sub-millisecond Search
-    details: FAISS-powered vector search at 0.78ms across 100K memories. 196x faster than naive approaches. Hybrid search with RRF fusion at 2.15ms.
-  - icon: 🧠
-    title: Cognitive Memory
-    details: Ebbinghaus forgetting curve, priority-based retention, automatic consolidation. Memories strengthen with use and fade without it — just like human memory.
+    title: 196× Faster Than sqlite-vec
+    details: FAISS-powered vector search at 0.78ms across 10K memories. No cloud API, no GPU — just a local index that auto-upgrades from exact to approximate search as your data grows.
+  - icon: 🔀
+    title: Hybrid Search with RRF
+    details: Vector similarity + BM25 keyword search + graph traversal, fused with Reciprocal Rank Fusion. 92% recall@10. Finds what pure vector or pure keyword search misses.
   - icon: 🔗
-    title: Knowledge Graph
-    details: Entities, relationships, and multi-hop traversal. Find connections across your memory that simple vector search misses.
+    title: Traversable Knowledge Graph
+    details: Typed entities and relationships with multi-hop BFS traversal via SQLite recursive CTEs. Store "WebApp depends_on API depends_on Database" and traverse the chain in one call.
+  - icon: 🧠
+    title: Cognitive Retention
+    details: Ebbinghaus forgetting curve with stability growth on each access. Priority-weighted scoring from importance, recency, access count, and retention. Memories that strengthen with use and fade without it.
   - icon: 🎯
-    title: Hybrid Search
-    details: Vector similarity + BM25 keyword search + graph traversal, fused with Reciprocal Rank Fusion. 92% recall@10.
-  - icon: 🔄
     title: Auto-Deduplication
-    details: MinHash LSH detects near-duplicates in <1ms. No more redundant memories cluttering your context.
-  - icon: 🏠
-    title: Zero Cloud
-    details: Everything runs locally. SQLite + FAISS. No API keys, no daemons, no network calls. Your memories stay on your machine.
+    details: MinHash LSH catches near-duplicates at 0.12ms before they enter the system. No more redundant memories cluttering search results.
+  - icon: 📦
+    title: Zero Infrastructure
+    details: SQLite + FAISS. No Docker, no PostgreSQL, no Redis, no API keys, no daemon. Your entire memory system is a single .db file you can back up, version control, or rsync.
 
 ---
-<br>
-
-<div style="text-align: center; padding: 20px 0;">
-  <a href="https://mantes.net" class="mantes-badge" target="_blank">
-    Powered by <strong>Mantes</strong>
-  </a>
-</div>

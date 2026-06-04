@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "arriadne"
 version = "0.1.1"
-description = "Production-ready memory system with vector search, graph traversal, and hybrid retrieval"
+description = "AI agent memory system — sub-millisecond hybrid search (FAISS vector + FTS5 keyword + RRF fusion), knowledge graph traversal, cognitive retention modeling, and auto-deduplication. Zero infrastructure."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Kyssta", email = "kyssta@users.noreply.github.com" },
 ]
-keywords = ["memory", "semantic-search", "vector-search", "knowledge-graph", "ai-agent"]
+keywords = ["memory", "semantic-search", "vector-search", "knowledge-graph", "ai-agent", "faiss", "fts5", "hybrid-search", "embedding", "deduplication", "retrieval", "rag", "llm", "agent-memory"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

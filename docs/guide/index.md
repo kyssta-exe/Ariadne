@@ -1,6 +1,6 @@
 # Introduction
 
-**Ariadne** is a next-generation memory system for AI agents. Named after the Greek goddess who gave Theseus the thread to navigate the Labyrinth, Ariadne gives your AI agent the thread to navigate its own memories.
+**Ariadne** is a memory system for AI agents. Named after the Greek goddess who gave Theseus the thread to navigate the Labyrinth, Ariadne gives your AI agent the thread to navigate its own memories.
 
 ## Why Ariadne?
 
@@ -47,26 +47,17 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 | Vector search (FAISS) | **0.78ms** | 10K memories |
 | Keyword search (FTS5) | **4.90ms** | 10K memories |
 | Hybrid search (RRF) | **2.15ms** | 10K memories |
-| Dedup check (MinHash) | **0.12ms** | 10K documents |
+| Dedup check (MinHash LSH) | **0.12ms** | 10K documents |
 | Graph traversal (3 hops) | **50ms** | 10K nodes |
 
 ## What Makes It Different
 
-1. **SQLite + FAISS** — Not sqlite-vec (647x slower). Not PostgreSQL (requires a server). Just SQLite for metadata/FTS5/graph, FAISS for vectors.
+1. **SQLite + FAISS** — Not sqlite-vec (200× slower). Not PostgreSQL (requires a server). Just SQLite for metadata/FTS5/graph, FAISS for vectors. Both embedded in-process.
 
 2. **Ebbinghaus Forgetting Curve** — Memories strengthen with each access and fade without it. Stability grows exponentially with reinforcement.
 
-3. **Priority-Based Retention** — When memory budget is hit, low-priority memories get soft-deleted, not important ones.
+3. **Priority-Based Retention** — When the memory budget is hit, low-priority memories get soft-deleted. High-importance memories are protected.
 
-4. **Auto-Deduplication** — MinHash LSH catches near-duplicates before they enter the system.
+4. **Auto-Deduplication** — MinHash LSH catches near-duplicates at 0.12ms before they enter the system. No more redundant memories.
 
-5. **Knowledge Graph** — Entities and relationships with multi-hop BFS traversal. Find connections vector search misses.
-
----
-<br>
-
-<div style="text-align: center; padding: 20px 0;">
-  <a href="https://mantes.net" class="mantes-badge" target="_blank">
-    Powered by <strong>Mantes</strong>
-  </a>
-</div>
+5. **Knowledge Graph** — Entities and typed relationships with multi-hop BFS traversal. Find connections that vector search alone would miss.
