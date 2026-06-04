@@ -31,7 +31,7 @@ const structuredData = computed(() => {
         name: 'Mantes',
         url: 'https://mantes.net',
       },
-      softwareVersion: '0.1.2',
+      softwareVersion: '0.1.3',
       downloadUrl: 'https://pypi.org/project/arriadne/',
       installUrl: 'https://pypi.org/project/arriadne/',
       codeRepository: 'https://github.com/kyssta-exe/Ariadne',
