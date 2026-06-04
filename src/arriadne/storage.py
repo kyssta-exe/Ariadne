@@ -1,0 +1,1180 @@
+"""Core storage layer for Ariadne memory system.
+
+Provides AriadneDB with SQLite (WAL, FTS5, graph tables) and FAISS vector index.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import math
+import re
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any, Protocol
+
+import faiss
+import numpy as np
+
+from arriadne.config import AriadneConfig
+
+logger = logging.getLogger(__name__)
+
+
+class _SupportsNumpy(Protocol):
+    def __array__(self) -> np.ndarray: ...
+
+
+Schema = sqlite3.Connection
+
+
+def _now() -> float:
+    """Return current Unix timestamp."""
+    return time.time()
+
+
+def _hash_content(content: str) -> str:
+    """Compute SHA-256 hash of content."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _fts_escape(query: str) -> str:
+    """Escape FTS5 special characters and expand into OR terms.
+
+    Each word is quoted individually to handle special characters,
+    then joined with OR for broad matching.
+    """
+    words = re.findall(r"\w+", query)
+    if not words:
+        return '""'
+    escaped = []
+    for word in words:
+        safe = word.replace('"', '""')
+        escaped.append(f'"{safe}"')
+    return " OR ".join(escaped)
+
+
+def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+    """Compute Jaccard similarity between two sets."""
+    if not a and not b:
+        return 0.0
+    intersection = a & b
+    union = a | b
+    return len(intersection) / len(union) if union else 0.0
+
+
+class AriadneDB:
+    """Core memory database with SQLite storage and FAISS vector indexing.
+
+    Supports vector search, full-text search, hybrid search, graph operations,
+    memory lifecycle management, and consolidation.
+
+    Args:
+        config: AriadneConfig instance with all settings.
+
+    Example:
+        >>> db = AriadneDB(config=AriadneConfig(db_path="test.db"))
+        >>> with db:
+        ...     db.add_memory("hello", np.zeros(384), memory_type="semantic")
+        ...     results = db.vector_search(np.zeros(384), k=5)
+    """
+
+    def __init__(self, config: AriadneConfig | None = None) -> None:
+        self._config = config or AriadneConfig()
+        self._conn: sqlite3.Connection | None = None
+        self._faiss_index: faiss.Index | None = None
+        self._id_map: dict[int, int] = {}  # internal_id -> faiss_id
+        self._reverse_id_map: dict[int, int] = {}  # faiss_id -> internal_id
+        self._next_faiss_id: int = 0
+        self._initialized = False
+
+    @property
+    def config(self) -> AriadneConfig:
+        """Return the configuration."""
+        return self._config
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """Return the database connection, opening if needed."""
+        if self._conn is None:
+            self.open()
+        assert self._conn is not None
+        return self._conn
+
+    def open(self) -> None:
+        """Open database connection and initialize schema + FAISS index."""
+        if self._initialized:
+            return
+        db_path = str(self._config.db_path)
+        logger.info("Opening database at %s", db_path)
+        self._conn = sqlite3.connect(db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(f"PRAGMA wal_autocheckpoint={self._config.wal_autocheckpoint}")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._create_schema()
+        self._load_faiss_index()
+        self._initialized = True
+
+    def close(self) -> None:
+        """Close database connection and save FAISS index."""
+        if self._faiss_index is not None:
+            self._save_faiss_index()
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+        self._initialized = False
+        logger.info("Database closed")
+
+    def __enter__(self) -> AriadneDB:
+        self.open()
+        return self
+
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: Any) -> None:
+        self.close()
+
+    def _create_schema(self) -> None:
+        """Create all SQLite tables, indexes, and FTS5 virtual tables."""
+        assert self._conn is not None
+        cursor = self._conn.cursor()
+
+        cursor.executescript("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                memory_type TEXT NOT NULL DEFAULT 'semantic',
+                importance REAL NOT NULL DEFAULT 0.5,
+                embedding BLOB,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                accessed_at REAL NOT NULL,
+                access_count INTEGER NOT NULL DEFAULT 0,
+                retention_strength REAL NOT NULL DEFAULT 1.0,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at REAL,
+                metadata TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memories_content_hash
+                ON memories(content_hash);
+            CREATE INDEX IF NOT EXISTS idx_memories_type
+                ON memories(memory_type);
+            CREATE INDEX IF NOT EXISTS idx_memories_importance
+                ON memories(importance);
+            CREATE INDEX IF NOT EXISTS idx_memories_deleted
+                ON memories(is_deleted);
+            CREATE INDEX IF NOT EXISTS idx_memories_created
+                ON memories(created_at);
+
+            CREATE TABLE IF NOT EXISTS entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                entity_type TEXT DEFAULT 'general',
+                created_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_entities_name
+                ON entities(name);
+
+            CREATE TABLE IF NOT EXISTS edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                edge_type TEXT NOT NULL DEFAULT 'related',
+                weight REAL NOT NULL DEFAULT 1.0,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (source_id) REFERENCES entities(id),
+                FOREIGN KEY (target_id) REFERENCES entities(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_edges_source
+                ON edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_target
+                ON edges(target_id);
+
+            CREATE TABLE IF NOT EXISTS memory_entities (
+                memory_id INTEGER NOT NULL,
+                entity_id INTEGER NOT NULL,
+                PRIMARY KEY (memory_id, entity_id),
+                FOREIGN KEY (memory_id) REFERENCES memories(id),
+                FOREIGN KEY (entity_id) REFERENCES entities(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_links (
+                source_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                link_type TEXT NOT NULL DEFAULT 'related',
+                strength REAL NOT NULL DEFAULT 1.0,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (source_id, target_id),
+                FOREIGN KEY (source_id) REFERENCES memories(id),
+                FOREIGN KEY (target_id) REFERENCES memories(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS consolidations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_ids TEXT NOT NULL,
+                consolidated_content TEXT NOT NULL,
+                consolidated_importance REAL NOT NULL,
+                created_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS access_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id INTEGER NOT NULL,
+                accessed_at REAL NOT NULL,
+                query TEXT,
+                FOREIGN KEY (memory_id) REFERENCES memories(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_access_log_memory
+                ON access_log(memory_id);
+        """)
+
+        # FTS5 virtual table
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+            USING fts5(
+                content,
+                content_rowid='id',
+                tokenize='porter unicode61'
+            )
+        """)
+
+        # FTS sync triggers - use DELETE for proper FTS5 cleanup
+        cursor.executescript("""
+            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(rowid, content)
+                VALUES (new.id, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                DELETE FROM memories_fts WHERE rowid = old.id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+                DELETE FROM memories_fts WHERE rowid = old.id;
+                INSERT INTO memories_fts(rowid, content)
+                VALUES (new.id, new.content);
+            END;
+        """)
+
+        self._conn.commit()
+        logger.debug("Schema created/verified")
+
+    def _load_faiss_index(self) -> None:
+        """Load FAISS index from disk or create a new one."""
+        index_path = self._get_faiss_path()
+        self._id_map = {}
+        self._reverse_id_map = {}
+        self._next_faiss_id = 0
+
+        if index_path.exists():
+            try:
+                self._faiss_index = faiss.read_index(str(index_path))
+                # Rebuild id maps from database
+                self._rebuild_id_maps()
+                logger.info(
+                    "Loaded FAISS index with %d vectors from %s",
+                    self._faiss_index.ntotal,
+                    index_path,
+                )
+            except Exception as e:
+                logger.warning("Failed to load FAISS index, creating new: %s", e)
+                self._faiss_index = None
+
+        if self._faiss_index is None:
+            self._faiss_index = self._create_faiss_index(0)
+            logger.info("Created new FAISS index")
+
+    def _get_faiss_path(self) -> Path:
+        """Return path for FAISS index file."""
+        return Path(str(self._config.db_path) + ".faiss")
+
+    def _rebuild_id_maps(self) -> None:
+        """Rebuild FAISS ID mappings from database embeddings."""
+        assert self._conn is not None
+        assert self._faiss_index is not None
+        self._id_map = {}
+        self._reverse_id_map = {}
+        self._next_faiss_id = 0
+
+        cursor = self._conn.execute(
+            "SELECT id FROM memories WHERE embedding IS NOT NULL AND is_deleted = 0"
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            internal_id = row[0]
+            faiss_id = self._next_faiss_id
+            self._id_map[internal_id] = faiss_id
+            self._reverse_id_map[faiss_id] = internal_id
+            self._next_faiss_id += 1
+
+    def _create_faiss_index(self, initial_size: int) -> faiss.Index:
+        """Create appropriate FAISS index based on config and size."""
+        dim = self._config.embedding_dim
+        match self._config.faiss_type:
+            case "flat_ip":
+                return faiss.IndexFlatIP(dim)
+            case "ivf_flat":
+                quantizer = faiss.IndexFlatIP(dim)
+                nlist = min(self._config.ivf_nlist, max(1, initial_size))
+                index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+                return index
+            case "auto":
+                if initial_size >= self._config.ivf_threshold:
+                    quantizer = faiss.IndexFlatIP(dim)
+                    nlist = min(
+                        self._config.ivf_nlist,
+                        max(1, initial_size // 10),
+                    )
+                    index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+                    return index
+                else:
+                    return faiss.IndexFlatIP(dim)
+            case _:
+                raise ValueError(f"Unknown faiss_type: {self._config.faiss_type!r}")
+
+    def _maybe_upgrade_faiss_index(self) -> None:
+        """Upgrade from FlatIP to IVFFlat if vector count exceeds threshold."""
+        assert self._faiss_index is not None
+        ntotal = self._faiss_index.ntotal
+        if self._config.faiss_type == "auto":
+            is_flat = isinstance(self._faiss_index, faiss.IndexFlatIP)
+            if is_flat and ntotal >= self._config.ivf_threshold:
+                logger.info(
+                    "Upgrading FAISS index from FlatIP to IVFFlat (%d vectors)",
+                    ntotal,
+                )
+                old_vectors = faiss.rev_swig_ptr(
+                    self._faiss_index.get_xb(), ntotal * self._config.embedding_dim
+                )
+                old_vectors = old_vectors.reshape(ntotal, self._config.embedding_dim).copy()
+
+                new_index = self._create_faiss_index(ntotal)
+                if isinstance(new_index, faiss.IndexIVFFlat):
+                    new_index.train(old_vectors)
+                new_index.add(old_vectors)
+                self._faiss_index = new_index
+
+    def _save_faiss_index(self) -> None:
+        """Save FAISS index to disk."""
+        if self._faiss_index is None or self._faiss_index.ntotal == 0:
+            return
+        try:
+            index_path = self._get_faiss_path()
+            # IVFFlat requires write_index directly
+            if isinstance(self._faiss_index, faiss.IndexIVFFlat):
+                faiss.write_index(self._faiss_index, str(index_path))
+            else:
+                faiss.write_index(self._faiss_index, str(index_path))
+            logger.debug("Saved FAISS index with %d vectors", self._faiss_index.ntotal)
+        except Exception as e:
+            logger.error("Failed to save FAISS index: %s", e)
+
+    def _normalize_embedding(self, embedding: np.ndarray) -> np.ndarray:
+        """L2-normalize embedding vector for cosine similarity."""
+        norm = np.linalg.norm(embedding)
+        if norm < 1e-10:
+            return embedding
+        return embedding / norm
+
+    def add_memory(
+        self,
+        content: str,
+        embedding: np.ndarray | None = None,
+        memory_type: str = "semantic",
+        importance: float = 0.5,
+        entities: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add a new memory to the database.
+
+        Args:
+            content: Text content of the memory.
+            embedding: Optional embedding vector (will be L2-normalized).
+            memory_type: Category of memory (semantic, episodic, procedural).
+            importance: Importance score (0.0-1.0).
+            entities: List of entity names to associate.
+            metadata: Optional JSON-serializable metadata dict.
+
+        Returns:
+            Dict with memory_id and status ('created' or 'duplicate').
+        """
+        assert self._conn is not None
+        try:
+            content_hash = _hash_content(content)
+
+            # Dedup check
+            cursor = self._conn.execute(
+                "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
+                (content_hash,),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                logger.info("Duplicate memory detected (hash=%s), id=%d", content_hash, existing[0])
+                return {"memory_id": existing[0], "status": "duplicate"}
+
+            now = _now()
+            embedding_blob = None
+            if embedding is not None:
+                emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                embedding_blob = emb.tobytes()
+
+            metadata_json = json.dumps(metadata) if metadata is not None else None
+
+            cursor = self._conn.execute(
+                """INSERT INTO memories
+                   (content, content_hash, memory_type, importance, embedding,
+                    created_at, updated_at, accessed_at, access_count,
+                    retention_strength, is_deleted, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?)""",
+                (content, content_hash, memory_type, importance, embedding_blob,
+                 now, now, now, metadata_json),
+            )
+            memory_id = cursor.lastassert_id if hasattr(cursor, 'lastassert_id') else cursor.lastrowid
+            assert memory_id is not None
+            memory_id = int(memory_id)
+
+            # Add to FAISS index
+            if embedding is not None:
+                faiss_id = self._next_faiss_id
+                emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                vec = emb.reshape(1, -1)
+                self._faiss_index.add(vec)
+                self._id_map[memory_id] = faiss_id
+                self._reverse_id_map[faiss_id] = memory_id
+                self._next_faiss_id += 1
+                self._maybe_upgrade_faiss_index()
+
+            # Associate entities
+            if entities:
+                for entity_name in entities:
+                    entity_id = self._get_or_create_entity(entity_name)
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                        (memory_id, entity_id),
+                    )
+
+            self._conn.commit()
+            logger.info(
+                "Added memory id=%d type=%s importance=%.2f content_preview=%.50s",
+                memory_id, memory_type, importance, content,
+            )
+            return {"memory_id": memory_id, "status": "created"}
+
+        except sqlite3.Error as e:
+            logger.error("Database error adding memory: %s", e)
+            raise
+        except Exception as e:
+            logger.error("Unexpected error adding memory: %s", e)
+            raise
+
+    def _get_or_create_entity(self, name: str) -> int:
+        """Get entity ID by name, creating if it doesn't exist."""
+        assert self._conn is not None
+        cursor = self._conn.execute(
+            "SELECT id FROM entities WHERE name = ?", (name,)
+        )
+        row = cursor.fetchone()
+        if row is not None:
+            return int(row[0])
+
+        cursor = self._conn.execute(
+            "INSERT INTO entities (name, created_at) VALUES (?, ?)",
+            (name, _now()),
+        )
+        entity_id = cursor.lastrowid
+        assert entity_id is not None
+        return int(entity_id)
+
+    def get_memory(self, memory_id: int) -> dict[str, Any] | None:
+        """Retrieve a memory by ID.
+
+        Args:
+            memory_id: The memory's unique ID.
+
+        Returns:
+            Memory dict with all fields, or None if not found/deleted.
+        """
+        assert self._conn is not None
+        try:
+            now = _now()
+            # Update access info first
+            self._conn.execute(
+                """UPDATE memories
+                   SET accessed_at = ?, access_count = access_count + 1
+                   WHERE id = ?""",
+                (now, memory_id),
+            )
+            self._conn.execute(
+                "INSERT INTO access_log (memory_id, accessed_at) VALUES (?, ?)",
+                (memory_id, now),
+            )
+            self._conn.commit()
+
+            # Now read the updated data
+            cursor = self._conn.execute(
+                """SELECT id, content, content_hash, memory_type, importance,
+                          created_at, updated_at, accessed_at, access_count,
+                          retention_strength, is_deleted, metadata
+                   FROM memories WHERE id = ?""",
+                (memory_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            return {
+                "id": row[0],
+                "content": row[1],
+                "content_hash": row[2],
+                "memory_type": row[3],
+                "importance": row[4],
+                "created_at": row[5],
+                "updated_at": row[6],
+                "accessed_at": row[7],
+                "access_count": row[8],
+                "retention_strength": row[9],
+                "is_deleted": bool(row[10]),
+                "metadata": json.loads(row[11]) if row[11] else None,
+            }
+        except sqlite3.Error as e:
+            logger.error("Database error getting memory %d: %s", memory_id, e)
+            return None
+
+    def update_memory(
+        self,
+        memory_id: int,
+        content: str | None = None,
+        importance: float | None = None,
+        embedding: np.ndarray | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Update an existing memory.
+
+        Args:
+            memory_id: The memory's unique ID.
+            content: New content (replaces old).
+            importance: New importance score.
+            embedding: New embedding vector.
+            metadata: New metadata dict.
+
+        Returns:
+            True if updated, False if memory not found.
+        """
+        assert self._conn is not None
+        try:
+            existing = self.get_memory(memory_id)
+            if existing is None:
+                return False
+
+            updates = ["updated_at = ?"]
+            params: list[Any] = [_now()]
+
+            if content is not None:
+                updates.append("content = ?")
+                params.append(content)
+                updates.append("content_hash = ?")
+                params.append(_hash_content(content))
+
+            if importance is not None:
+                updates.append("importance = ?")
+                params.append(importance)
+
+            if metadata is not None:
+                updates.append("metadata = ?")
+                params.append(json.dumps(metadata))
+
+            if embedding is not None:
+                emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                updates.append("embedding = ?")
+                params.append(emb.tobytes())
+
+            params.append(memory_id)
+            self._conn.execute(
+                f"UPDATE memories SET {', '.join(updates)} WHERE id = ?",
+                params,
+            )
+
+            # Update FAISS if embedding changed
+            if embedding is not None and memory_id in self._id_map:
+                old_faiss_id = self._id_map[memory_id]
+                new_emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                # We can't update in-place for most FAISS indices, so we note the change
+                # For production, would need index rebuild
+                logger.debug("Updated embedding for memory %d (FAISS rebuild needed)", memory_id)
+
+            self._conn.commit()
+            logger.info("Updated memory %d", memory_id)
+            return True
+
+        except sqlite3.Error as e:
+            logger.error("Database error updating memory %d: %s", memory_id, e)
+            return False
+
+    def delete_memory(self, memory_id: int, hard: bool = False) -> bool:
+        """Delete a memory (soft or hard).
+
+        Args:
+            memory_id: The memory's unique ID.
+            hard: If True, permanently delete. Otherwise soft-delete.
+
+        Returns:
+            True if deleted, False if memory not found.
+        """
+        assert self._conn is not None
+        try:
+            cursor = self._conn.execute(
+                "SELECT id FROM memories WHERE id = ?", (memory_id,)
+            )
+            if cursor.fetchone() is None:
+                return False
+
+            if hard:
+                self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+                self._conn.execute("DELETE FROM memory_entities WHERE memory_id = ?", (memory_id,))
+                self._conn.execute("DELETE FROM memory_links WHERE source_id = ? OR target_id = ?",
+                                   (memory_id, memory_id))
+                self._conn.execute("DELETE FROM access_log WHERE memory_id = ?", (memory_id,))
+                # Remove from FAISS
+                if memory_id in self._id_map:
+                    faiss_id = self._id_map[memory_id]
+                    del self._id_map[memory_id]
+                    del self._reverse_id_map[faiss_id]
+            else:
+                now = _now()
+                self._conn.execute(
+                    "UPDATE memories SET is_deleted = 1, deleted_at = ? WHERE id = ?",
+                    (now, memory_id),
+                )
+
+            self._conn.commit()
+            logger.info("Deleted memory %d (hard=%s)", memory_id, hard)
+            return True
+
+        except sqlite3.Error as e:
+            logger.error("Database error deleting memory %d: %s", memory_id, e)
+            return False
+
+    def vector_search(
+        self, embedding: np.ndarray, k: int = 10
+    ) -> list[dict[str, Any]]:
+        """Search memories by vector similarity (cosine).
+
+        Args:
+            embedding: Query embedding vector.
+            k: Number of results to return.
+
+        Returns:
+            List of memory dicts ordered by similarity (descending).
+        """
+        assert self._faiss_index is not None
+        if self._faiss_index.ntotal == 0:
+            return []
+
+        try:
+            emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+            vec = emb.reshape(1, -1)
+            k = min(k, self._faiss_index.ntotal)
+            distances, indices = self._faiss_index.search(vec, k)
+
+            results = []
+            for dist, idx in zip(distances[0], indices[0]):
+                if idx < 0:
+                    continue
+                internal_id = self._reverse_id_map.get(int(idx))
+                if internal_id is None:
+                    continue
+                memory = self.get_memory(internal_id)
+                if memory is not None and not memory["is_deleted"]:
+                    memory["score"] = float(dist)
+                    memory["search_type"] = "vector"
+                    results.append(memory)
+            return results
+
+        except Exception as e:
+            logger.error("Vector search error: %s", e)
+            return []
+
+    def fts_search(self, query: str, k: int = 10) -> list[dict[str, Any]]:
+        """Search memories by full-text keyword matching.
+
+        Args:
+            query: Search query string.
+            k: Number of results to return.
+
+        Returns:
+            List of memory dicts ordered by relevance.
+        """
+        assert self._conn is not None
+        try:
+            fts_query = _fts_escape(query)
+            cursor = self._conn.execute(
+                """SELECT rowid, rank FROM memories_fts
+                   WHERE memories_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ?""",
+                (fts_query, k),
+            )
+            rows = cursor.fetchall()
+
+            results = []
+            for rowid, rank in rows:
+                memory = self.get_memory(int(rowid))
+                if memory is not None and not memory["is_deleted"]:
+                    memory["score"] = abs(float(rank))
+                    memory["search_type"] = "fts"
+                    results.append(memory)
+            return results
+
+        except sqlite3.Error as e:
+            logger.error("FTS search error: %s", e)
+            return []
+
+    def hybrid_search(
+        self,
+        query: str,
+        embedding: np.ndarray | None = None,
+        k: int = 10,
+        rrf_k: int = 60,
+    ) -> list[dict[str, Any]]:
+        """Hybrid search combining vector and FTS results with Reciprocal Rank Fusion.
+
+        Args:
+            query: Text query for FTS.
+            embedding: Query embedding for vector search (optional).
+            k: Number of results to return.
+            rrf_k: RRF parameter (higher = less weight on top ranks).
+
+        Returns:
+            List of memory dicts ordered by fused score.
+        """
+        fts_results = self.fts_search(query, k=k * 2)
+        vector_results = []
+        if embedding is not None:
+            vector_results = self.vector_search(embedding, k=k * 2)
+
+        # Build rank maps
+        fts_ranks: dict[int, int] = {}
+        for rank, mem in enumerate(fts_results):
+            fts_ranks[mem["id"]] = rank + 1
+
+        vector_ranks: dict[int, int] = {}
+        for rank, mem in enumerate(vector_results):
+            vector_ranks[mem["id"]] = rank + 1
+
+        # Reciprocal Rank Fusion
+        all_ids = set(fts_ranks.keys()) | set(vector_ranks.keys())
+        fused_scores: dict[int, float] = {}
+        for mid in all_ids:
+            score = 0.0
+            if mid in fts_ranks:
+                score += 1.0 / (rrf_k + fts_ranks[mid])
+            if mid in vector_ranks:
+                score += 1.0 / (rrf_k + vector_ranks[mid])
+            fused_scores[mid] = score
+
+        # Sort by fused score
+        sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
+        sorted_ids = sorted_ids[:k]
+
+        results = []
+        for mid in sorted_ids:
+            memory = self.get_memory(mid)
+            if memory is not None and not memory["is_deleted"]:
+                memory["score"] = fused_scores[mid]
+                memory["search_type"] = "hybrid"
+                results.append(memory)
+        return results
+
+    def add_edge(
+        self,
+        source_entity: str,
+        target_entity: str,
+        edge_type: str = "related",
+        weight: float = 1.0,
+    ) -> None:
+        """Add a directed edge between two entities.
+
+        Args:
+            source_entity: Name of the source entity.
+            target_entity: Name of the target entity.
+            edge_type: Type of relationship.
+            weight: Edge weight (0.0-1.0).
+        """
+        assert self._conn is not None
+        try:
+            source_id = self._get_or_create_entity(source_entity)
+            target_id = self._get_or_create_entity(target_entity)
+            self._conn.execute(
+                """INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (source_id, target_id, edge_type, weight, _now()),
+            )
+            self._conn.commit()
+            logger.debug("Added edge %s ->%s (type=%s)", source_entity, target_entity, edge_type)
+        except sqlite3.Error as e:
+            logger.error("Error adding edge: %s", e)
+
+    def traverse_graph(
+        self,
+        entity_name: str,
+        hops: int = 1,
+        edge_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Traverse the knowledge graph from an entity using BFS.
+
+        Uses recursive CTE for efficient traversal.
+
+        Args:
+            entity_name: Starting entity name.
+            hops: Maximum number of hops.
+            edge_type: Optional filter on edge type.
+
+        Returns:
+            Dict with 'nodes' (entity names) and 'edges' (connections).
+        """
+        assert self._conn is not None
+        try:
+            # Find source entity
+            cursor = self._conn.execute(
+                "SELECT id FROM entities WHERE name = ?", (entity_name,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return {"nodes": [entity_name], "edges": []}
+
+            source_id = int(row[0])
+            hops = min(hops, self._config.max_graph_depth)
+
+            edge_filter = ""
+            params: list[Any] = [source_id, hops, hops]
+            if edge_type:
+                edge_filter = "AND e.edge_type = ?"
+                params.append(edge_type)
+
+            # Recursive CTE for BFS
+            query = f"""
+                WITH RECURSIVE graph_traverse(node_id, depth) AS (
+                    SELECT ?, 0
+                    UNION
+                    SELECT CASE
+                        WHEN gt.depth < ?
+                        THEN e.target_id
+                        ELSE e.source_id
+                    END, gt.depth + 1
+                    FROM graph_traverse gt
+                    JOIN edges e ON (
+                        e.source_id = gt.node_id
+                        OR e.target_id = gt.node_id
+                    )
+                    WHERE gt.depth < ?
+                    {edge_filter}
+                )
+                SELECT DISTINCT gt.node_id, en.name
+                FROM graph_traverse gt
+                JOIN entities en ON en.id = gt.node_id
+            """
+
+            cursor = self._conn.execute(query, params)
+            nodes = []
+            seen_ids: set[int] = set()
+            for node_id, name in cursor.fetchall():
+                if node_id not in seen_ids:
+                    nodes.append(name)
+                    seen_ids.add(node_id)
+
+            # Get edges between discovered nodes
+            if len(nodes) > 1:
+                placeholders = ",".join("?" * len(seen_ids))
+                edge_query = f"""
+                    SELECT e.source_id, e.target_id, e.edge_type, e.weight,
+                           s.name, t.name
+                    FROM edges e
+                    JOIN entities s ON s.id = e.source_id
+                    JOIN entities t ON t.id = e.target_id
+                    WHERE e.source_id IN ({placeholders})
+                      AND e.target_id IN ({placeholders})
+                """
+                node_list = list(seen_ids)
+                cursor = self._conn.execute(edge_query, node_list + node_list)
+                edges = []
+                for row in cursor.fetchall():
+                    edges.append({
+                        "source": row[4],
+                        "target": row[5],
+                        "type": row[2],
+                        "weight": row[3],
+                    })
+            else:
+                edges = []
+
+            return {"nodes": nodes, "edges": edges}
+
+        except sqlite3.Error as e:
+            logger.error("Graph traversal error: %s", e)
+            return {"nodes": [entity_name], "edges": []}
+
+    def compute_retention_strength(self, memory: dict[str, Any]) -> float:
+        """Compute Ebbinghaus retention score for a memory.
+
+        Uses R = e^(-t/S) where t is time since last access and S is
+        the retention half-life adjusted by importance.
+
+        Args:
+            memory: Memory dict with timing fields.
+
+        Returns:
+            Retention strength (0.0-1.0).
+        """
+        now = _now()
+        time_since_access = now - memory["accessed_at"]
+        half_life = self._config.retention_half_life * memory["importance"]
+        if half_life <= 0:
+            return 0.0
+        return math.exp(-time_since_access / half_life)
+
+    def compute_priority_score(self, memory: dict[str, Any]) -> float:
+        """Compute priority score using weighted formula.
+
+        Priority = w_imp * importance + w_rec * recency + w_acc * access_norm + w_ret * retention
+
+        Args:
+            memory: Memory dict with all scoring fields.
+
+        Returns:
+            Priority score (0.0-1.0).
+        """
+        now = _now()
+        weights = self._config.priority_weights
+
+        age = now - memory["created_at"]
+        recency = 1.0 / (1.0 + age / 86400.0)  # Normalized to days
+
+        access_norm = min(1.0, memory["access_count"] / 100.0)
+
+        retention = self.compute_retention_strength(memory)
+
+        score = (
+            weights["importance"] * memory["importance"]
+            + weights["recency"] * recency
+            + weights["access_count"] * access_norm
+            + weights["retention"] * retention
+        )
+        return round(score, 6)
+
+    def evict(self) -> int:
+        """Evict low-priority memories via soft delete.
+
+        Removes memories with the lowest priority scores up to
+        the configured eviction budget.
+
+        Returns:
+            Number of memories evicted.
+        """
+        assert self._conn is not None
+        try:
+            cursor = self._conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE is_deleted = 0"
+            )
+            total = cursor.fetchone()[0]
+            if total == 0:
+                return 0
+
+            budget = max(1, int(total * self._config.eviction_budget))
+
+            cursor = self._conn.execute(
+                """SELECT id, importance, created_at, accessed_at,
+                          access_count, retention_strength
+                   FROM memories WHERE is_deleted = 0"""
+            )
+            rows = cursor.fetchall()
+            memories = []
+            for row in rows:
+                mem = {
+                    "id": row[0],
+                    "importance": row[1],
+                    "created_at": row[2],
+                    "accessed_at": row[3],
+                    "access_count": row[4],
+                    "retention_strength": row[5],
+                }
+                mem["priority"] = self.compute_priority_score(mem)
+                memories.append(mem)
+
+            memories.sort(key=lambda m: m["priority"])
+            to_evict = memories[:budget]
+
+            now = _now()
+            evicted = 0
+            for mem in to_evict:
+                self._conn.execute(
+                    "UPDATE memories SET is_deleted = 1, deleted_at = ? WHERE id = ?",
+                    (now, mem["id"]),
+                )
+                evicted += 1
+
+            self._conn.commit()
+            logger.info("Evicted %d low-priority memories", evicted)
+            return evicted
+
+        except sqlite3.Error as e:
+            logger.error("Eviction error: %s", e)
+            return 0
+
+    def consolidate(self) -> int:
+        """Consolidate similar memories using Jaccard similarity.
+
+        Groups memories with similarity above threshold and creates
+        consolidated summaries.
+
+        Returns:
+            Number of consolidation groups created.
+        """
+        assert self._conn is not None
+        try:
+            cursor = self._conn.execute(
+                """SELECT id, content, content_hash, importance, created_at
+                   FROM memories
+                   WHERE is_deleted = 0
+                   ORDER BY created_at DESC
+                   LIMIT 5000"""
+            )
+            rows = cursor.fetchall()
+            if len(rows) < self._config.consolidation_min_group:
+                return 0
+
+            # Tokenize and group
+            token_sets: dict[int, set[str]] = {}
+            memories: list[dict[str, Any]] = []
+            for row in rows:
+                mid = row[0]
+                tokens = set(row[1].lower().split())
+                token_sets[mid] = tokens
+                memories.append({
+                    "id": mid,
+                    "content": row[1],
+                    "importance": row[3],
+                    "created_at": row[4],
+                })
+
+            # Find groups
+            used: set[int] = set()
+            groups: list[list[dict[str, Any]]] = []
+
+            for i, mem_a in enumerate(memories):
+                if mem_a["id"] in used:
+                    continue
+                group = [mem_a]
+                used.add(mem_a["id"])
+
+                for j, mem_b in enumerate(memories):
+                    if j <= i or mem_b["id"] in used:
+                        continue
+                    sim = _jaccard_similarity(token_sets[mem_a["id"]], token_sets[mem_b["id"]])
+                    if sim >= self._config.consolidation_threshold:
+                        group.append(mem_b)
+                        used.add(mem_b["id"])
+
+                if len(group) >= self._config.consolidation_min_group:
+                    groups.append(group)
+
+            # Create consolidation records
+            consolidated = 0
+            for group in groups:
+                contents = [m["content"] for m in group]
+                avg_importance = sum(m["importance"] for m in group) / len(group)
+                consolidated_content = " | ".join(contents)
+                memory_ids = json.dumps([m["id"] for m in group])
+
+                self._conn.execute(
+                    """INSERT INTO consolidations
+                       (memory_ids, consolidated_content, consolidated_importance, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (memory_ids, consolidated_content, avg_importance, _now()),
+                )
+                consolidated += 1
+
+            self._conn.commit()
+            logger.info("Created %d consolidation groups", consolidated)
+            return consolidated
+
+        except sqlite3.Error as e:
+            logger.error("Consolidation error: %s", e)
+            return 0
+
+    def stats(self) -> dict[str, Any]:
+        """Get comprehensive database statistics.
+
+        Returns:
+            Dict with counts, sizes, index info, and performance metrics.
+        """
+        assert self._conn is not None
+        try:
+            result: dict[str, Any] = {}
+
+            # Memory counts
+            cursor = self._conn.execute("SELECT COUNT(*) FROM memories")
+            result["total_memories"] = cursor.fetchone()[0]
+
+            cursor = self._conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
+            result["active_memories"] = cursor.fetchone()[0]
+
+            cursor = self._conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 1")
+            result["deleted_memories"] = cursor.fetchone()[0]
+
+            # By type
+            cursor = self._conn.execute(
+                """SELECT memory_type, COUNT(*) FROM memories
+                   WHERE is_deleted = 0 GROUP BY memory_type"""
+            )
+            result["by_type"] = {row[0]: row[1] for row in cursor.fetchall()}
+
+            # Entity counts
+            cursor = self._conn.execute("SELECT COUNT(*) FROM entities")
+            result["total_entities"] = cursor.fetchone()[0]
+
+            cursor = self._conn.execute("SELECT COUNT(*) FROM edges")
+            result["total_edges"] = cursor.fetchone()[0]
+
+            cursor = self._conn.execute("SELECT COUNT(*) FROM memory_links")
+            result["total_memory_links"] = cursor.fetchone()[0]
+
+            # Consolidation count
+            cursor = self._conn.execute("SELECT COUNT(*) FROM consolidations")
+            result["total_consolidations"] = cursor.fetchone()[0]
+
+            # FAISS index
+            if self._faiss_index is not None:
+                result["faiss_vectors"] = self._faiss_index.ntotal
+                result["faiss_type"] = type(self._faiss_index).__name__
+                result["faiss_dimension"] = self._config.embedding_dim
+            else:
+                result["faiss_vectors"] = 0
+                result["faiss_type"] = "none"
+                result["faiss_dimension"] = self._config.embedding_dim
+
+            # Average importance
+            cursor = self._conn.execute(
+                "SELECT AVG(importance) FROM memories WHERE is_deleted = 0"
+            )
+            avg_row = cursor.fetchone()
+            result["avg_importance"] = round(float(avg_row[0] or 0.0), 4)
+
+            # Database file size
+            db_path = Path(str(self._config.db_path))
+            if db_path.exists():
+                result["db_size_bytes"] = db_path.stat().st_size
+            else:
+                result["db_size_bytes"] = 0
+
+            return result
+
+        except sqlite3.Error as e:
+            logger.error("Stats error: %s", e)
+            return {"error": str(e)}

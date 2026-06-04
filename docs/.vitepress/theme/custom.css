@@ -1,0 +1,68 @@
+:root {
+  --vp-c-brand-1: #6366f1;
+  --vp-c-brand-2: #818cf8;
+  --vp-c-brand-3: #4f46e5;
+  --vp-c-brand-soft: rgba(99, 102, 241, 0.14);
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: -webkit-linear-gradient(120deg, #6366f1 30%, #a78bfa);
+
+  --vp-home-hero-image-background-image: linear-gradient(-45deg, #6366f1 50%, #a78bfa 50%);
+  --vp-home-hero-image-filter: blur(44px);
+}
+
+.dark {
+  --vp-c-brand-1: #818cf8;
+  --vp-c-brand-2: #a5b4fc;
+  --vp-c-brand-3: #6366f1;
+}
+
+.VPFeature {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.VPFeature:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(99, 102, 241, 0.15);
+}
+
+/* Powered by Mantes badge */
+.mantes-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 20px;
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  font-size: 13px;
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+.mantes-badge:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+/* Benchmark table styling */
+.bench-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.bench-table th,
+.bench-table td {
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+.bench-table th {
+  font-weight: 600;
+  color: var(--vp-c-brand-1);
+}
+.bench-table tr:hover {
+  background: var(--vp-c-bg-soft);
+}
+.speed-highlight {
+  color: #22c55e;
+  font-weight: 700;
+}

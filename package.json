@@ -1,0 +1,22 @@
+{
+  "name": "arriadne",
+  "version": "1.0.0",
+  "description": "> Production-ready memory system with vector search, graph traversal, and hybrid retrieval",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  },
+  "type": "module"
+}
