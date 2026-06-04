@@ -14,6 +14,7 @@ Features:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -456,16 +457,18 @@ Memories to consolidate:
 
         cursor.execute(
             """INSERT INTO memories
-            (content, topic, importance, hash, metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (content, content_hash, memory_type, importance, embedding,
+             created_at, updated_at, accessed_at, access_count,
+             retention_strength, is_deleted, metadata)
+            VALUES (?, ?, 'semantic', ?, NULL, ?, ?, ?, 0, 1.0, 0, ?)""",
             (
                 content,
-                consolidated.get("topic", ""),
-                consolidated.get("importance", 7),
                 mem_hash,
+                consolidated.get("importance", 0.7),
+                time.time(),
+                time.time(),
+                time.time(),
                 str(consolidated.get("metadata", {})),
-                time.time(),
-                time.time(),
             ),
         )
 
@@ -480,5 +483,183 @@ Memories to consolidate:
 
         self._conn.commit()
         logger.info(
-            f"Consolidated group {group.group_id}: {group.size} memories -> 1"
+            "Consolidated group %s: %d memories -> 1",
+            group.group_id, group.size,
         )
+
+    # ─── Advanced Consolidation Features ──────────────────────
+
+    def consolidate_by_topic(
+        self,
+        min_cluster_size: int = 3,
+        method: str = "similarity",
+    ) -> ConsolidationResult:
+        """
+        Consolidate memories grouped by topic similarity.
+
+        Clusters memories by embedding similarity and merges each cluster.
+
+        Args:
+            min_cluster_size: Minimum memories in a cluster to consolidate.
+            method: Clustering method ("similarity", "temporal").
+
+        Returns:
+            ConsolidationResult with summary of operations.
+        """
+        t0 = time.monotonic()
+
+        if method == "similarity" and self._embeddings:
+            groups = self._group_by_similarity(limit=500)
+        elif method == "temporal":
+            groups = self._group_by_time(limit=500)
+        else:
+            groups = self._group_by_topic(limit=500)
+
+        # Filter by min_cluster_size
+        groups = [g for g in groups if g.size >= min_cluster_size]
+
+        total_before = 0
+        total_after = 0
+        consolidated = []
+
+        for group in groups:
+            total_before += group.size
+            result, remove_ids = self.consolidate_group(group)
+            if result:
+                total_after += 1
+                consolidated.append(group)
+                self._apply_consolidation(result, remove_ids, group)
+
+        latency = (time.monotonic() - t0) * 1000
+
+        return ConsolidationResult(
+            groups_processed=len(groups),
+            memories_before=total_before,
+            memories_after=total_after,
+            consolidated_groups=consolidated,
+            latency_ms=latency,
+        )
+
+    def get_consolidation_suggestions(
+        self,
+        min_cluster_size: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """
+        Suggest memory clusters that should be consolidated.
+
+        Returns clusters of related memories without actually merging them.
+
+        Args:
+            min_cluster_size: Minimum cluster size to suggest.
+
+        Returns:
+            List of suggestion dicts with cluster info.
+        """
+        groups = self.find_related_groups(method="similarity", limit=200)
+        suggestions = []
+
+        for group in groups:
+            if group.size >= min_cluster_size:
+                # Detect contradictions within the group
+                contradictions = self._detect_group_contradictions(group)
+
+                suggestions.append({
+                    "group_id": group.group_id,
+                    "size": group.size,
+                    "topic": group.topic,
+                    "avg_similarity": round(group.avg_similarity, 4),
+                    "memories": [
+                        {"id": m.get("id"), "content": m.get("content", "")[:100]}
+                        for m in group.memories[:5]
+                    ],
+                    "has_contradictions": len(contradictions) > 0,
+                    "contradictions": contradictions,
+                    "suggested_action": "merge" if len(contradictions) == 0 else "review_contradictions",
+                })
+
+        return suggestions
+
+    def _detect_group_contradictions(
+        self,
+        group: ConsolidationGroup,
+    ) -> List[Dict[str, Any]]:
+        """
+        Detect contradictions within a consolidation group.
+
+        Uses simple pattern matching for negation and factual conflict detection.
+        """
+        contradictions = []
+        negation_patterns = [
+            r"\bnot\b", r"\bnever\b", r"\bno\b", r"\bcan't\b",
+            r"\bdon't\b", r"\bdoesn't\b", r"\bdidn't\b", r"\bisn't\b",
+        ]
+
+        for i, mem_a in enumerate(group.memories):
+            content_a = mem_a.get("content", "")
+            for j, mem_b in enumerate(group.memories):
+                if j <= i:
+                    continue
+                content_b = mem_b.get("content", "")
+
+                # Check if one contains negation of the other
+                has_neg_a = any(re.search(p, content_a, re.IGNORECASE) for p in negation_patterns)
+                has_neg_b = any(re.search(p, content_b, re.IGNORECASE) for p in negation_patterns)
+
+                if has_neg_a != has_neg_b:
+                    # One has negation, one doesn't — potential contradiction
+                    # Check word overlap
+                    words_a = set(content_a.lower().split())
+                    words_b = set(content_b.lower().split())
+                    overlap = len(words_a & words_b) / max(len(words_a | words_b), 1)
+
+                    if overlap > 0.3:
+                        contradictions.append({
+                            "memory_a_id": mem_a.get("id"),
+                            "memory_b_id": mem_b.get("id"),
+                            "memory_a_preview": content_a[:100],
+                            "memory_b_preview": content_b[:100],
+                            "overlap": round(overlap, 3),
+                        })
+
+        return contradictions
+
+    def generate_cluster_summary(
+        self,
+        group: ConsolidationGroup,
+    ) -> str:
+        """
+        Generate a text summary for a consolidation group.
+
+        Simple extractive summary: takes the most informative sentences.
+        """
+        if not group.memories:
+            return ""
+
+        sentences = []
+        for mem in group.memories:
+            content = mem.get("content", "")
+            for sentence in content.split(". "):
+                sentence = sentence.strip()
+                if sentence and len(sentence) > 10:
+                    sentences.append(sentence)
+
+        if not sentences:
+            return group.memories[0].get("content", "")
+
+        # Score sentences by uniqueness (simple TF-IDF-like)
+        word_freq: Dict[str, int] = {}
+        for sent in sentences:
+            for word in sent.lower().split():
+                word_freq[word] = word_freq.get(word, 0) + 1
+
+        scored = []
+        for sent in sentences:
+            words = sent.lower().split()
+            score = sum(1.0 / word_freq.get(w, 1) for w in words) / max(len(words), 1)
+            scored.append((score, sent))
+
+        # Take top 3 sentences
+        scored.sort(reverse=True)
+        top_sentences = [sent for _, sent in scored[:3]]
+
+        return ". ".join(top_sentences) + "."

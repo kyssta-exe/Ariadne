@@ -242,6 +242,7 @@ class AriadneMemory:
         metadata: dict[str, Any] | None = None,
         auto_embed: bool = True,
         tenant_id: str = "default",
+        category: str = "semantic",
     ) -> dict[str, Any]:
         """Store a memory. Auto-embeds if no embedding provided.
 
@@ -254,6 +255,7 @@ class AriadneMemory:
             metadata: Optional metadata dict.
             auto_embed: Whether to auto-generate embedding (default True).
             tenant_id: Multi-tenant isolation key (default: "default").
+            category: Memory lifecycle category (episodic/semantic/procedural/working).
 
         Returns:
             Dict with memory_id, status, and optional contradictions.
@@ -292,6 +294,7 @@ class AriadneMemory:
                 entities=entities,
                 metadata=metadata,
                 tenant_id=tenant_id,
+                category=category,
             )
 
             memory_id = storage_result["memory_id"]
@@ -323,6 +326,7 @@ class AriadneMemory:
         importance: float = 0.5,
         auto_embed: bool = True,
         batch_size: int = 500,
+        category: str = "semantic",
     ) -> list[dict[str, Any]]:
         """Store multiple memories in a batch for maximum throughput.
 
@@ -361,6 +365,7 @@ class AriadneMemory:
                     "content": content,
                     "memory_type": memory_type,
                     "importance": importance,
+                    "category": category,
                 }
                 if i < len(embeddings) and embeddings[i] is not None:
                     item["embedding"] = embeddings[i]
@@ -393,6 +398,7 @@ class AriadneMemory:
         time_range: tuple[float, float] | None = None,
         importance_min: float | None = None,
         auto_embed: bool = True,
+        category_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories. Auto-embeds query if no embedding provided.
 
@@ -420,6 +426,8 @@ class AriadneMemory:
                 if mem.get("is_deleted"):
                     continue
                 if type_filter and mem.get("memory_type") != type_filter:
+                    continue
+                if category_filter and mem.get("category", "semantic") != category_filter:
                     continue
                 if time_range:
                     start, end = time_range
@@ -866,6 +874,128 @@ class AriadneMemory:
     def close(self) -> None:
         """Close the memory system, saving all state."""
         self._db.close()
+
+    # ─── Advanced Features ─────────────────────────────────────
+
+    def get_category_stats(self) -> dict[str, Any]:
+        """Get statistics for each memory category."""
+        from arriadne.categories import MemoryCategoryManager
+        manager = MemoryCategoryManager()
+        return manager.get_category_stats(self._db.conn)
+
+    def get_importance_stats(self) -> dict[str, Any]:
+        """Get importance score distribution statistics."""
+        cursor = self._db.conn.execute(
+            """SELECT importance, COUNT(*) as cnt
+               FROM memories WHERE is_deleted = 0
+               GROUP BY ROUND(importance * 10) / 10
+               ORDER BY importance"""
+        )
+        distribution = {row[0]: row[1] for row in cursor.fetchall()}
+
+        cursor = self._db.conn.execute(
+            """SELECT AVG(importance), MIN(importance), MAX(importance),
+                      AVG(access_count)
+               FROM memories WHERE is_deleted = 0"""
+        )
+        row = cursor.fetchone()
+
+        return {
+            "distribution": distribution,
+            "avg_importance": round(float(row[0] or 0), 4),
+            "min_importance": round(float(row[1] or 0), 4),
+            "max_importance": round(float(row[2] or 0), 4),
+            "avg_access_count": round(float(row[3] or 0), 2),
+        }
+
+    def recompute_importance(self) -> int:
+        """Recompute importance for all memories based on access patterns and category."""
+        from arriadne.categories import MemoryCategoryManager
+        import math
+
+        manager = MemoryCategoryManager()
+        cursor = self._db.conn.execute(
+            """SELECT id, importance, category, access_count, accessed_at, created_at
+               FROM memories WHERE is_deleted = 0"""
+        )
+        updated = 0
+        now = time.time()
+
+        for row in cursor.fetchall():
+            mem_id = row[0]
+            importance = row[1] or 0.5
+            category = row[2] or "semantic"
+            access_count = row[3] or 0
+            accessed_at = row[4] or row[5]
+            created_at = row[5]
+
+            config = manager.get_config(category)
+            days_since_access = (now - accessed_at) / 86400.0
+
+            # Apply decay
+            new_importance = config.apply_decay(importance, days_since_access)
+
+            # Apply access boost
+            new_importance = config.apply_access_boost(new_importance, access_count)
+
+            # Clamp
+            new_importance = max(config.min_importance, min(config.max_importance, new_importance))
+
+            if abs(new_importance - importance) > 0.001:
+                self._db.conn.execute(
+                    "UPDATE memories SET importance = ? WHERE id = ?",
+                    (round(new_importance, 4), mem_id),
+                )
+                updated += 1
+
+        self._db.conn.commit()
+        logger.info("Recomputed importance for %d memories", updated)
+        return updated
+
+    def get_graph_stats(self) -> dict[str, Any]:
+        """Get comprehensive knowledge graph statistics."""
+        from arriadne.visualization import get_graph_stats
+        return get_graph_stats(self)
+
+    def export_dot(self, path: str) -> dict[str, Any]:
+        """Export knowledge graph as DOT/Graphviz format."""
+        from arriadne.visualization import export_dot
+        return export_dot(self, path)
+
+    def export_mermaid(self, path: str) -> dict[str, Any]:
+        """Export knowledge graph as Mermaid diagram."""
+        from arriadne.visualization import export_mermaid
+        return export_mermaid(self, path)
+
+    def export_json_graph(self, path: str) -> dict[str, Any]:
+        """Export knowledge graph as D3.js-compatible JSON."""
+        from arriadne.visualization import export_json_graph
+        return export_json_graph(self, path)
+
+    def export_json(self, path: str) -> dict[str, Any]:
+        """Export all memories to JSON."""
+        from arriadne.migration import export_json
+        return export_json(self, path)
+
+    def import_json(self, path: str) -> dict[str, Any]:
+        """Import memories from Ariadne JSON."""
+        from arriadne.migration import import_json
+        return import_json(self, path)
+
+    def import_from_text(self, path: str, category: str = "semantic") -> dict[str, Any]:
+        """Import memories from plain text file."""
+        from arriadne.migration import import_from_text
+        return import_from_text(self, path, category=category)
+
+    def import_from_markdown(self, path: str) -> dict[str, Any]:
+        """Import memories from markdown file."""
+        from arriadne.migration import import_from_markdown
+        return import_from_markdown(self, path)
+
+    def export_markdown(self, path: str) -> dict[str, Any]:
+        """Export memories as human-readable markdown."""
+        from arriadne.migration import export_markdown
+        return export_markdown(self, path)
 
     def __enter__(self) -> AriadneMemory:
         return self

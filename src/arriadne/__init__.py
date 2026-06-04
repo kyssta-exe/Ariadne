@@ -92,6 +92,26 @@ try:
 except ImportError:
     create_app = None
 
+try:
+    from arriadne.categories import MemoryCategoryManager, CategoryConfig
+except ImportError:
+    MemoryCategoryManager = None
+
+try:
+    from arriadne.migration import (
+        export_json, import_json, import_from_chromadb,
+        import_from_mem0, import_from_text, import_from_markdown, export_markdown,
+    )
+except ImportError:
+    export_json = None
+
+try:
+    from arriadne.visualization import (
+        export_dot, export_mermaid, export_json_graph, get_graph_stats,
+    )
+except ImportError:
+    export_dot = None
+
 __all__ = [
     "AriadneMemory",
     "AriadneConfig",
@@ -123,4 +143,17 @@ __all__ = [
     "AriadneClient",
     "AriadneClientAsync",
     "create_app",
+    "MemoryCategoryManager",
+    "CategoryConfig",
+    "export_json",
+    "import_json",
+    "import_from_chromadb",
+    "import_from_mem0",
+    "import_from_text",
+    "import_from_markdown",
+    "export_markdown",
+    "export_dot",
+    "export_mermaid",
+    "export_json_graph",
+    "get_graph_stats",
 ]

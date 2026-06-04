@@ -681,6 +681,50 @@ def create_app(
         except Exception as e:
             return {"error": str(e)}
 
+    @app.get("/graph/stats", tags=["graph"])
+    async def graph_stats(authorization: Optional[str] = Header(None)):
+        """Get comprehensive graph statistics (nodes, edges, centrality, components)."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            from arriadne.visualization import get_graph_stats
+            return get_graph_stats(mem._memory)
+        except Exception as e:
+            return {"error": str(e)}
+
+    # === Category Routes ===
+
+    @app.get("/categories", tags=["categories"])
+    async def category_stats(authorization: Optional[str] = Header(None)):
+        """Get memory category statistics."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            return mem._memory.get_category_stats()
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.get("/importance/stats", tags=["scoring"])
+    async def importance_stats(authorization: Optional[str] = Header(None)):
+        """Get importance score distribution statistics."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            return mem._memory.get_importance_stats()
+        except Exception as e:
+            return {"error": str(e)}
+
+    @app.post("/importance/recompute", tags=["scoring"])
+    async def recompute_importance(authorization: Optional[str] = Header(None)):
+        """Recompute importance for all memories based on access patterns."""
+        await verify_api_key(authorization)
+        mem = get_memory()
+        try:
+            updated = mem._memory.recompute_importance()
+            return {"recomputed": updated}
+        except Exception as e:
+            return {"error": str(e)}
+
     # === Community Routes ===
 
     @app.get("/communities", tags=["communities"])

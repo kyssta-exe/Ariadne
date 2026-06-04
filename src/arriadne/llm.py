@@ -1,7 +1,8 @@
 """
 LLM Provider Abstraction Layer
 
-Supports: OpenAI, Anthropic, Ollama, any OpenAI-compatible API.
+Supports: OpenAI, Anthropic, Ollama, Gemini, Cohere, DeepSeek, Groq, Mistral, xAI,
+any OpenAI-compatible API.
 All providers exposed through a unified async interface.
 
 Usage:
@@ -308,6 +309,317 @@ class OllamaProvider(BaseLLMProvider):
         )
 
 
+class GoogleGeminiProvider(BaseLLMProvider):
+    """Google Gemini API via google-generativeai SDK."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "gemini-2.0-flash",
+        timeout: float = 60.0,
+    ):
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise ImportError("pip install google-generativeai")
+
+        self._api_key = api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
+        self._model = model
+        self._timeout = timeout
+        genai.configure(api_key=self._api_key)
+        self._client = genai.GenerativeModel(model)
+
+    @property
+    def name(self) -> str:
+        return f"gemini:{self._model}"
+
+    def is_available(self) -> bool:
+        return bool(self._api_key)
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+    ) -> LLMResponse:
+        import asyncio
+        import google.generativeai as genai
+
+        # Build content list for Gemini
+        contents = []
+        system_instruction = None
+        for m in messages:
+            if m.role == "system":
+                system_instruction = m.content
+            else:
+                role = "model" if m.role == "assistant" else "user"
+                contents.append({"role": role, "parts": [m.content]})
+
+        gen_config = genai.types.GenerationConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+
+        t0 = time.monotonic()
+        # Use synchronous generate_content in a thread to avoid blocking
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: self._client.generate_content(
+                contents,
+                generation_config=gen_config,
+                system_instruction=system_instruction,
+            ),
+        )
+        latency = (time.monotonic() - t0) * 1000
+
+        content_text = resp.text if resp.text else ""
+        usage = {}
+        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+            um = resp.usage_metadata
+            usage = {
+                "prompt_tokens": getattr(um, "prompt_token_count", 0),
+                "completion_tokens": getattr(um, "candidates_token_count", 0),
+                "total_tokens": getattr(um, "total_token_count", 0),
+            }
+
+        return LLMResponse(
+            content=content_text,
+            model=self._model,
+            usage=usage,
+            latency_ms=latency,
+            raw=resp,
+        )
+
+
+class CohereProvider(BaseLLMProvider):
+    """Cohere API via cohere SDK."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "command-r-plus",
+        timeout: float = 60.0,
+    ):
+        try:
+            import cohere
+        except ImportError:
+            raise ImportError("pip install cohere")
+
+        self._api_key = api_key or os.environ.get("COHERE_API_KEY", "")
+        self._model = model
+        self._timeout = timeout
+        self._client = cohere.ClientV2(api_key=self._api_key)
+
+    @property
+    def name(self) -> str:
+        return f"cohere:{self._model}"
+
+    def is_available(self) -> bool:
+        return bool(self._api_key)
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+    ) -> LLMResponse:
+        import asyncio
+
+        # Build Cohere message format
+        cohere_messages = []
+        for m in messages:
+            cohere_messages.append({"role": m.role, "content": m.content})
+
+        t0 = time.monotonic()
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: self._client.chat(
+                model=self._model,
+                messages=cohere_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            ),
+        )
+        latency = (time.monotonic() - t0) * 1000
+
+        content_text = ""
+        if resp.message and resp.message.content:
+            content_text = resp.message.content[0].text
+
+        usage = {}
+        if hasattr(resp, "usage") and resp.usage:
+            tokens = getattr(resp.usage, "tokens", None)
+            if isinstance(tokens, dict):
+                usage = {
+                    "prompt_tokens": tokens.get("input_tokens", 0),
+                    "completion_tokens": tokens.get("output_tokens", 0),
+                    "total_tokens": tokens.get("input_tokens", 0) + tokens.get("output_tokens", 0),
+                }
+
+        return LLMResponse(
+            content=content_text,
+            model=self._model,
+            usage=usage,
+            latency_ms=latency,
+            raw=resp,
+        )
+
+
+class DeepSeekProvider(BaseLLMProvider):
+    """DeepSeek API — OpenAI-compatible."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "deepseek-chat",
+        timeout: float = 60.0,
+    ):
+        self._inner = OpenAIProvider(
+            api_key=api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com",
+            model=model,
+            timeout=timeout,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"deepseek:{self._inner._model}"
+
+    def is_available(self) -> bool:
+        return self._inner.is_available()
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+    ) -> LLMResponse:
+        return await self._inner.complete(messages, temperature, max_tokens, response_format)
+
+
+class GroqProvider(BaseLLMProvider):
+    """Groq API — OpenAI-compatible."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "llama-3.3-70b-versatile",
+        timeout: float = 60.0,
+    ):
+        self._inner = OpenAIProvider(
+            api_key=api_key or os.environ.get("GROQ_API_KEY", ""),
+            base_url="https://api.groq.com/openai",
+            model=model,
+            timeout=timeout,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"groq:{self._inner._model}"
+
+    def is_available(self) -> bool:
+        return self._inner.is_available()
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+    ) -> LLMResponse:
+        return await self._inner.complete(messages, temperature, max_tokens, response_format)
+
+
+class MistralProvider(BaseLLMProvider):
+    """Mistral AI API — OpenAI-compatible."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "mistral-large-latest",
+        timeout: float = 60.0,
+    ):
+        self._inner = OpenAIProvider(
+            api_key=api_key or os.environ.get("MISTRAL_API_KEY", ""),
+            base_url="https://api.mistral.ai",
+            model=model,
+            timeout=timeout,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"mistral:{self._inner._model}"
+
+    def is_available(self) -> bool:
+        return self._inner.is_available()
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+    ) -> LLMResponse:
+        return await self._inner.complete(messages, temperature, max_tokens, response_format)
+
+
+class xAIProvider(BaseLLMProvider):
+    """xAI (Grok) API — OpenAI-compatible."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "grok-2",
+        timeout: float = 60.0,
+    ):
+        self._inner = OpenAIProvider(
+            api_key=api_key or os.environ.get("XAI_API_KEY", ""),
+            base_url="https://api.x.ai",
+            model=model,
+            timeout=timeout,
+        )
+
+    @property
+    def name(self) -> str:
+        return f"xai:{self._inner._model}"
+
+    def is_available(self) -> bool:
+        return self._inner.is_available()
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        response_format: Optional[Dict] = None,
+    ) -> LLMResponse:
+        return await self._inner.complete(messages, temperature, max_tokens, response_format)
+
+
+# ──────────────────────────────────────────────────────────────
+# Provider Registry
+# ──────────────────────────────────────────────────────────────
+
+PROVIDER_REGISTRY: Dict[str, type] = {
+    "openai": OpenAIProvider,
+    "anthropic": AnthropicProvider,
+    "ollama": OllamaProvider,
+    "gemini": GoogleGeminiProvider,
+    "google": GoogleGeminiProvider,
+    "cohere": CohereProvider,
+    "deepseek": DeepSeekProvider,
+    "groq": GroqProvider,
+    "mistral": MistralProvider,
+    "xai": xAIProvider,
+    "grok": xAIProvider,
+}
+
+
 class LLMProvider:
     """
     Unified LLM interface. Auto-detects provider from config or environment.
@@ -342,34 +654,38 @@ class LLMProvider:
         api_key = config.get("api_key", "")
         base_url = config.get("base_url", "")
 
-        if provider_name == "anthropic":
-            inner = AnthropicProvider(
-                api_key=api_key,
-                model=model or "claude-sonnet-4-20250514",
-                timeout=config.get("timeout", 60.0),
-            )
-        elif provider_name == "ollama":
-            inner = OllamaProvider(
-                base_url=base_url or None,
-                model=model or "llama3.2",
-                timeout=config.get("timeout", 120.0),
-            )
-        else:
-            # OpenAI, OpenRouter, Together, etc.
-            url = base_url or None
-            if provider_name == "openrouter" and not url:
-                url = "https://openrouter.ai/api/v1"
-            elif provider_name == "together" and not url:
-                url = "https://api.together.xyz/v1"
-            elif provider_name == "lmstudio" and not url:
-                url = "http://localhost:1234/v1"
+        # Check known provider names that have dedicated classes
+        if provider_name in PROVIDER_REGISTRY:
+            provider_cls = PROVIDER_REGISTRY[provider_name]
+            # Build kwargs for the provider
+            kwargs: Dict[str, Any] = {}
+            if provider_name in ("ollama",):
+                kwargs["base_url"] = base_url or None
+                kwargs["model"] = model or "llama3.2"
+                kwargs["timeout"] = config.get("timeout", 120.0)
+            else:
+                if api_key:
+                    kwargs["api_key"] = api_key
+                if model:
+                    kwargs["model"] = model
+                kwargs["timeout"] = config.get("timeout", 60.0)
+            return cls(provider_cls(**kwargs))
 
-            inner = OpenAIProvider(
-                api_key=api_key,
-                base_url=url,
-                model=model or "gpt-4o-mini",
-                timeout=config.get("timeout", 60.0),
-            )
+        # Fallback: OpenAI-compatible aliases
+        url = base_url or None
+        if provider_name == "openrouter" and not url:
+            url = "https://openrouter.ai/api/v1"
+        elif provider_name == "together" and not url:
+            url = "https://api.together.xyz/v1"
+        elif provider_name == "lmstudio" and not url:
+            url = "http://localhost:1234/v1"
+
+        inner = OpenAIProvider(
+            api_key=api_key,
+            base_url=url,
+            model=model or "gpt-4o-mini",
+            timeout=config.get("timeout", 60.0),
+        )
 
         return cls(inner)
 
@@ -386,6 +702,36 @@ class LLMProvider:
             model = os.environ.get("ARIDADNE_LLM_MODEL", "claude-sonnet-4-20250514")
             return cls.from_config({"provider": "anthropic", "model": model})
 
+        # Check Gemini
+        if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+            model = os.environ.get("ARIDADNE_LLM_MODEL", "gemini-2.0-flash")
+            return cls.from_config({"provider": "gemini", "model": model})
+
+        # Check Cohere
+        if os.environ.get("COHERE_API_KEY"):
+            model = os.environ.get("ARIDADNE_LLM_MODEL", "command-r-plus")
+            return cls.from_config({"provider": "cohere", "model": model})
+
+        # Check Groq
+        if os.environ.get("GROQ_API_KEY"):
+            model = os.environ.get("ARIDADNE_LLM_MODEL", "llama-3.3-70b-versatile")
+            return cls.from_config({"provider": "groq", "model": model})
+
+        # Check DeepSeek
+        if os.environ.get("DEEPSEEK_API_KEY"):
+            model = os.environ.get("ARIDADNE_LLM_MODEL", "deepseek-chat")
+            return cls.from_config({"provider": "deepseek", "model": model})
+
+        # Check Mistral
+        if os.environ.get("MISTRAL_API_KEY"):
+            model = os.environ.get("ARIDADNE_LLM_MODEL", "mistral-large-latest")
+            return cls.from_config({"provider": "mistral", "model": model})
+
+        # Check xAI
+        if os.environ.get("XAI_API_KEY"):
+            model = os.environ.get("ARIDADNE_LLM_MODEL", "grok-2")
+            return cls.from_config({"provider": "xai", "model": model})
+
         # Check Ollama
         ollama = OllamaProvider()
         if ollama.is_available():
@@ -395,6 +741,12 @@ class LLMProvider:
             "No LLM provider available. Set one of:\n"
             "  - OPENAI_API_KEY environment variable\n"
             "  - ANTHROPIC_API_KEY environment variable\n"
+            "  - GOOGLE_API_KEY or GEMINI_API_KEY environment variable\n"
+            "  - COHERE_API_KEY environment variable\n"
+            "  - GROQ_API_KEY environment variable\n"
+            "  - DEEPSEEK_API_KEY environment variable\n"
+            "  - MISTRAL_API_KEY environment variable\n"
+            "  - XAI_API_KEY environment variable\n"
             "  - Ollama running on localhost:11434\n"
             "  - Pass provider config to LLMProvider.from_config()"
         )

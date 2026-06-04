@@ -12,6 +12,7 @@ import math
 import re
 import sqlite3
 import time
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
@@ -140,6 +141,8 @@ class AriadneDB:
         self._wal_checkpoint_interval: int = 1000  # Checkpoint every N writes
         # Lazy FAISS persistence tracking
         self._faiss_write_count: int = 0
+        self._faiss_lock: threading.Lock = threading.Lock()
+        self._write_lock: threading.Lock = threading.Lock()  # Serializes all write transactions
 
     @property
     def config(self) -> AriadneConfig:
@@ -352,6 +355,13 @@ class AriadneDB:
             cursor.execute("ALTER TABLE memories ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_tenant ON memories(tenant_id)")
 
+        # Categories: add category column if missing (migration-safe)
+        try:
+            cursor.execute("SELECT category FROM memories LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT 'semantic'")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)")
+
         # FTS5 virtual table
         cursor.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
@@ -518,6 +528,7 @@ class AriadneDB:
         entities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         tenant_id: str = "default",
+        category: str = "semantic",
     ) -> dict[str, Any]:
         """Add a new memory to the database.
 
@@ -529,73 +540,75 @@ class AriadneDB:
             entities: List of entity names to associate.
             metadata: Optional JSON-serializable metadata dict.
             tenant_id: Multi-tenant isolation key (default: "default").
+            category: Memory lifecycle category (episodic/semantic/procedural/working).
 
         Returns:
             Dict with memory_id and status ('created' or 'duplicate').
         """
         assert self._conn is not None
         try:
-            content_hash = _hash_content(content)
+            with self._write_lock:
+                content_hash = _hash_content(content)
 
-            # Dedup check
-            cursor = self._conn.execute(
-                "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
-                (content_hash,),
-            )
-            existing = cursor.fetchone()
-            if existing is not None:
-                logger.info("Duplicate memory detected (hash=%s), id=%d", content_hash, existing[0])
-                return {"memory_id": existing[0], "status": "duplicate"}
+                # Dedup check
+                cursor = self._conn.execute(
+                    "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
+                    (content_hash,),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    logger.info("Duplicate memory detected (hash=%s), id=%d", content_hash, existing[0])
+                    return {"memory_id": existing[0], "status": "duplicate"}
 
-            now = _now()
-            embedding_blob = None
-            if embedding is not None:
-                emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
-                embedding_blob = emb.tobytes()
+                now = _now()
+                embedding_blob = None
+                if embedding is not None:
+                    emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                    embedding_blob = emb.tobytes()
 
-            metadata_json = json.dumps(metadata) if metadata is not None else None
+                metadata_json = json.dumps(metadata) if metadata is not None else None
 
-            cursor = self._conn.execute(
-                """INSERT INTO memories
-                   (content, content_hash, memory_type, importance, embedding,
-                    created_at, updated_at, accessed_at, access_count,
-                    retention_strength, is_deleted, metadata, tenant_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?)""",
-                (content, content_hash, memory_type, importance, embedding_blob,
-                 now, now, now, metadata_json, tenant_id),
-            )
-            memory_id = cursor.lastrowid
-            assert memory_id is not None
-            memory_id = int(memory_id)
+                cursor = self._conn.execute(
+                    """INSERT INTO memories
+                       (content, content_hash, memory_type, importance, embedding,
+                        created_at, updated_at, accessed_at, access_count,
+                        retention_strength, is_deleted, metadata, tenant_id, category)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?, ?)""",
+                    (content, content_hash, memory_type, importance, embedding_blob,
+                     now, now, now, metadata_json, tenant_id, category),
+                )
+                memory_id = cursor.lastrowid
+                assert memory_id is not None
+                memory_id = int(memory_id)
 
-            # Add to FAISS index
-            if embedding is not None:
-                faiss_id = self._next_faiss_id
-                emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
-                vec = emb.reshape(1, -1)
-                self._faiss_index.add(vec)
-                self._id_map[memory_id] = faiss_id
-                self._reverse_id_map[faiss_id] = memory_id
-                self._next_faiss_id += 1
+                # Add to FAISS index
+                if embedding is not None:
+                    faiss_id = self._next_faiss_id
+                    emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                    vec = emb.reshape(1, -1)
+                    self._faiss_index.add(vec)
+                    self._id_map[memory_id] = faiss_id
+                    self._reverse_id_map[faiss_id] = memory_id
+                    self._next_faiss_id += 1
 
-            # Associate entities
-            if entities:
-                for entity_name in entities:
-                    entity_id = self._get_or_create_entity(entity_name)
-                    self._conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
-                        (memory_id, entity_id),
-                    )
+                # Associate entities
+                if entities:
+                    for entity_name in entities:
+                        entity_id = self._get_or_create_entity(entity_name)
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                            (memory_id, entity_id),
+                        )
 
-            self._commit()
-            # Lazy FAISS save: only persists to disk every N writes
-            self._maybe_save_faiss()
-            self._maybe_upgrade_faiss_index()
-            logger.info(
-                "Added memory id=%d type=%s importance=%.2f content_preview=%.50s",
-                memory_id, memory_type, importance, content,
-            )
-            return {"memory_id": memory_id, "status": "created"}
+                self._commit()
+                # Lazy FAISS save: only persists to disk every N writes
+                self._maybe_save_faiss()
+                self._maybe_upgrade_faiss_index()
+                logger.info(
+                    "Added memory id=%d type=%s importance=%.2f content_preview=%.50s",
+                    memory_id, memory_type, importance, content,
+                )
+                return {"memory_id": memory_id, "status": "created"}
 
         except sqlite3.Error as e:
             logger.error("Database error adding memory: %s", e)
@@ -674,6 +687,7 @@ class AriadneDB:
             memory_type = item.get("memory_type", "semantic")
             importance = item.get("importance", 0.5)
             metadata = item.get("metadata")
+            category = item.get("category", "semantic")
 
             c_hash = content_hashes[orig_idx]
 
@@ -686,7 +700,7 @@ class AriadneDB:
 
             memory_rows.append((
                 content, c_hash, memory_type, importance, embedding_blob,
-                now, now, now, 0, 1.0, 0, metadata_json,
+                now, now, now, 0, 1.0, 0, metadata_json, category,
             ))
 
             if embedding is not None:
@@ -701,8 +715,8 @@ class AriadneDB:
             """INSERT INTO memories
                (content, content_hash, memory_type, importance, embedding,
                 created_at, updated_at, accessed_at, access_count,
-                retention_strength, is_deleted, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                retention_strength, is_deleted, metadata, category)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             memory_rows,
         )
 
@@ -724,16 +738,17 @@ class AriadneDB:
                 ) for pos in embedding_indices],
                 dtype=np.float32,
             )
-            self._faiss_index.add(emb_array)
+            with self._faiss_lock:
+                self._faiss_index.add(emb_array)
 
-            # Update ID maps in bulk
-            for i, pos in enumerate(embedding_indices):
-                memory_id = assigned_ids[pos]
-                faiss_id = self._next_faiss_id + i
-                self._id_map[memory_id] = faiss_id
-                self._reverse_id_map[faiss_id] = memory_id
+                # Update ID maps in bulk
+                for i, pos in enumerate(embedding_indices):
+                    memory_id = assigned_ids[pos]
+                    faiss_id = self._next_faiss_id + i
+                    self._id_map[memory_id] = faiss_id
+                    self._reverse_id_map[faiss_id] = memory_id
 
-            self._next_faiss_id += len(embedding_indices)
+                self._next_faiss_id += len(embedding_indices)
 
         # Phase 5: Batch entity inserts
         if entity_entries:
@@ -831,6 +846,11 @@ class AriadneDB:
             result["tenant_id"] = row[12] if len(row) > 12 else "default"
         except (IndexError, KeyError):
             result["tenant_id"] = "default"
+        # category may not exist in older databases
+        try:
+            result["category"] = row[13] if len(row) > 13 else "semantic"
+        except (IndexError, KeyError):
+            result["category"] = "semantic"
         return result
 
     def _read_memory(self, memory_id: int) -> dict[str, Any] | None:
@@ -844,7 +864,7 @@ class AriadneDB:
             cursor = self._conn.execute(
                 """SELECT id, content, content_hash, memory_type, importance,
                           created_at, updated_at, accessed_at, access_count,
-                          retention_strength, is_deleted, metadata, tenant_id
+                          retention_strength, is_deleted, metadata, tenant_id, category
                    FROM memories WHERE id = ?""",
                 (memory_id,),
             )
@@ -884,7 +904,7 @@ class AriadneDB:
             cursor = self._conn.execute(
                 """SELECT id, content, content_hash, memory_type, importance,
                           created_at, updated_at, accessed_at, access_count,
-                          retention_strength, is_deleted, metadata, tenant_id
+                          retention_strength, is_deleted, metadata, tenant_id, category
                    FROM memories WHERE id = ?""",
                 (memory_id,),
             )
@@ -990,11 +1010,13 @@ class AriadneDB:
                 self._conn.execute("DELETE FROM memory_links WHERE source_id = ? OR target_id = ?",
                                    (memory_id, memory_id))
                 self._conn.execute("DELETE FROM access_log WHERE memory_id = ?", (memory_id,))
-                # Remove from FAISS
+                # Remove from FAISS (note: FAISS doesn't support efficient removal;
+                # we remove from our maps and skip deleted IDs during search)
                 if memory_id in self._id_map:
-                    faiss_id = self._id_map[memory_id]
-                    del self._id_map[memory_id]
-                    del self._reverse_id_map[faiss_id]
+                    with self._faiss_lock:
+                        faiss_id = self._id_map[memory_id]
+                        del self._id_map[memory_id]
+                        del self._reverse_id_map[faiss_id]
             else:
                 now = _now()
                 self._conn.execute(
@@ -1030,7 +1052,8 @@ class AriadneDB:
             emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
             vec = emb.reshape(1, -1)
             k = min(k, self._faiss_index.ntotal)
-            distances, indices = self._faiss_index.search(vec, k)
+            with self._faiss_lock:
+                distances, indices = self._faiss_index.search(vec, k)
 
             results = []
             for dist, idx in zip(distances[0], indices[0]):
@@ -1084,7 +1107,8 @@ class AriadneDB:
             queries = queries / norms
 
             k = min(k, self._faiss_index.ntotal)
-            distances, indices = self._faiss_index.search(queries, k)
+            with self._faiss_lock:
+                distances, indices = self._faiss_index.search(queries, k)
 
             all_results: list[list[dict[str, Any]]] = []
             for query_idx in range(len(queries)):
@@ -1573,6 +1597,13 @@ class AriadneDB:
                    WHERE is_deleted = 0 GROUP BY memory_type"""
             )
             result["by_type"] = {row[0]: row[1] for row in cursor.fetchall()}
+
+            # By category
+            cursor = self._conn.execute(
+                """SELECT category, COUNT(*) FROM memories
+                   WHERE is_deleted = 0 GROUP BY category"""
+            )
+            result["by_category"] = {row[0]: row[1] for row in cursor.fetchall()}
 
             # Entity counts
             cursor = self._conn.execute("SELECT COUNT(*) FROM entities")

@@ -6,10 +6,15 @@ Auto-downloads model on first use, caches locally.
 Supports:
 - ONNX Runtime + all-MiniLM-L6-v2 (default, ~22MB, 384-dim)
 - Sentence Transformers (if installed)
-- Custom user-provided embedder
+- Nomic Embed (ONNX, 768-dim)
+- BGE Embed (ONNX, 384-dim)
+- OpenAI Embeddings (API)
+- Cohere Embeddings (API)
+- Jina Embeddings (API)
+- Voyage Embeddings (API)
 - Keyword fallback (TF-IDF-like, no model needed)
+- Custom user-provided embedder
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -385,6 +390,248 @@ class SentenceTransformerEmbedding(EmbeddingProvider):
         ).astype(np.float32)
 
 
+class NomicEmbedding(EmbeddingProvider):
+    """Nomic Embed via ONNX Runtime.
+
+    Uses nomic-embed-text-v1.5, 768 dimensions.
+    Downloads the ONNX model from HuggingFace on first use.
+    """
+
+    def __init__(
+        self,
+        cache_dir: Path | str | None = None,
+    ) -> None:
+        self._inner = OnnxEmbedding(
+            model_id="nomic-ai/nomic-embed-text-v1.5",
+            dimension=768,
+            cache_dir=cache_dir,
+            max_length=8192,
+        )
+
+    @property
+    def dimension(self) -> int:
+        return self._inner.dimension
+
+    @property
+    def name(self) -> str:
+        return "nomic-embed-text-v1.5"
+
+    def embed(self, text: str) -> np.ndarray:
+        return self._inner.embed(text)
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        return self._inner.embed_batch(texts)
+
+
+class BGEEmbedding(EmbeddingProvider):
+    """BGE Embed via ONNX Runtime.
+
+    Uses BAAI/bge-small-en-v1.5, 384 dimensions.
+    Downloads the ONNX model from HuggingFace on first use.
+    """
+
+    def __init__(
+        self,
+        cache_dir: Path | str | None = None,
+    ) -> None:
+        self._inner = OnnxEmbedding(
+            model_id="BAAI/bge-small-en-v1.5",
+            dimension=384,
+            cache_dir=cache_dir,
+            max_length=512,
+        )
+
+    @property
+    def dimension(self) -> int:
+        return self._inner.dimension
+
+    @property
+    def name(self) -> str:
+        return "bge-small-en-v1.5"
+
+    def embed(self, text: str) -> np.ndarray:
+        return self._inner.embed(text)
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        return self._inner.embed_batch(texts)
+
+
+class OpenAIEmbedding(EmbeddingProvider):
+    """OpenAI Embeddings API.
+
+    Uses text-embedding-3-small, 1536 dimensions.
+    Requires: pip install openai
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "text-embedding-3-small",
+        dimension: int = 1536,
+    ) -> None:
+        try:
+            import openai
+        except ImportError:
+            raise ImportError("pip install openai")
+
+        self._api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self._model = model
+        self._dimension = dimension
+        self._client = openai.OpenAI(api_key=self._api_key)
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def name(self) -> str:
+        return f"openai-embed:{self._model}"
+
+    def embed(self, text: str) -> np.ndarray:
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        resp = self._client.embeddings.create(
+            model=self._model,
+            input=texts,
+        )
+        embeddings = [item.embedding for item in resp.data]
+        return np.array(embeddings, dtype=np.float32)
+
+
+class CohereEmbedding(EmbeddingProvider):
+    """Cohere Embeddings API.
+
+    Uses embed-english-v3.0, 1024 dimensions.
+    Requires: pip install cohere
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "embed-english-v3.0",
+        dimension: int = 1024,
+    ) -> None:
+        try:
+            import cohere
+        except ImportError:
+            raise ImportError("pip install cohere")
+
+        self._api_key = api_key or os.environ.get("COHERE_API_KEY", "")
+        self._model = model
+        self._dimension = dimension
+        self._client = cohere.ClientV2(api_key=self._api_key)
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def name(self) -> str:
+        return f"cohere-embed:{self._model}"
+
+    def embed(self, text: str) -> np.ndarray:
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        resp = self._client.embed(
+            texts=texts,
+            model=self._model,
+            input_type="search_document",
+            embedding_types=["float"],
+        )
+        embeddings = resp.embeddings.float
+        return np.array(embeddings, dtype=np.float32)
+
+
+class JinaEmbedding(EmbeddingProvider):
+    """Jina Embeddings API (OpenAI-compatible).
+
+    Uses jina-embeddings-v3, 1024 dimensions.
+    Requires: pip install openai
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "jina-embeddings-v3",
+        dimension: int = 1024,
+    ) -> None:
+        try:
+            import openai
+        except ImportError:
+            raise ImportError("pip install openai")
+
+        self._api_key = api_key or os.environ.get("JINA_API_KEY", "")
+        self._model = model
+        self._dimension = dimension
+        self._client = openai.OpenAI(
+            api_key=self._api_key,
+            base_url="https://api.jina.ai/v1",
+        )
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def name(self) -> str:
+        return f"jina-embed:{self._model}"
+
+    def embed(self, text: str) -> np.ndarray:
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        resp = self._client.embeddings.create(
+            model=self._model,
+            input=texts,
+        )
+        embeddings = [item.embedding for item in resp.data]
+        return np.array(embeddings, dtype=np.float32)
+
+
+class VoyageEmbedding(EmbeddingProvider):
+    """Voyage AI Embeddings API.
+
+    Uses voyage-3, 1024 dimensions.
+    Requires: pip install voyageai
+    """
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "voyage-3",
+        dimension: int = 1024,
+    ) -> None:
+        try:
+            import voyageai
+        except ImportError:
+            raise ImportError("pip install voyageai")
+
+        self._api_key = api_key or os.environ.get("VOYAGE_API_KEY", "")
+        self._model = model
+        self._dimension = dimension
+        self._client = voyageai.Client(api_key=self._api_key)
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def name(self) -> str:
+        return f"voyage-embed:{self._model}"
+
+    def embed(self, text: str) -> np.ndarray:
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        resp = self._client.embed(
+            texts,
+            model=self._model,
+        )
+        return np.array(resp.embeddings, dtype=np.float32)
+
+
 class CustomEmbedding(EmbeddingProvider):
     """User-provided embedding function.
 
@@ -420,6 +667,24 @@ class CustomEmbedding(EmbeddingProvider):
         return result.astype(np.float32)
 
 
+# ──────────────────────────────────────────────────────────────
+# Embedding Provider Registry
+# ──────────────────────────────────────────────────────────────
+
+EMBEDDING_REGISTRY: dict[str, type] = {
+    "onnx": OnnxEmbedding,
+    "sentence-transformers": SentenceTransformerEmbedding,
+    "nomic": NomicEmbedding,
+    "bge": BGEEmbedding,
+    "openai": OpenAIEmbedding,
+    "cohere": CohereEmbedding,
+    "jina": JinaEmbedding,
+    "voyage": VoyageEmbedding,
+    "keyword": KeywordEmbedding,
+    "custom": CustomEmbedding,
+}
+
+
 def auto_detect_provider(
     dimension: int = _DEFAULT_EMBEDDING_DIM,
     preferred: str | None = None,
@@ -430,12 +695,18 @@ def auto_detect_provider(
     1. preferred (if specified)
     2. ONNX Runtime (if available, auto-downloads model)
     3. Sentence Transformers (if installed)
-    4. Keyword fallback (always available)
+    4. Nomic Embed (ONNX, if model can be downloaded)
+    5. BGE Embed (ONNX, if model can be downloaded)
+    6. OpenAI Embeddings (if OPENAI_API_KEY is set)
+    7. Cohere Embeddings (if COHERE_API_KEY is set)
+    8. Jina Embeddings (if JINA_API_KEY is set)
+    9. Keyword fallback (always available)
 
     Args:
         dimension: Desired embedding dimension.
         preferred: Preferred provider name ("onnx", "sentence-transformers",
-                   "keyword", "custom", or None for auto-detect).
+                   "nomic", "bge", "openai", "cohere", "jina", "keyword",
+                   "custom", or None for auto-detect).
 
     Returns:
         The best available EmbeddingProvider.
@@ -444,12 +715,24 @@ def auto_detect_provider(
         return OnnxEmbedding(dimension=dimension)
     elif preferred == "sentence-transformers":
         return SentenceTransformerEmbedding(dimension=dimension)
+    elif preferred == "nomic":
+        return NomicEmbedding()
+    elif preferred == "bge":
+        return BGEEmbedding()
+    elif preferred == "openai":
+        return OpenAIEmbedding(dimension=dimension)
+    elif preferred == "cohere":
+        return CohereEmbedding(dimension=dimension)
+    elif preferred == "jina":
+        return JinaEmbedding(dimension=dimension)
+    elif preferred == "voyage":
+        return VoyageEmbedding(dimension=dimension)
     elif preferred == "keyword":
         return KeywordEmbedding(dimension=dimension)
     elif preferred is not None:
         raise ValueError(f"Unknown embedding provider: {preferred}")
 
-    # Auto-detect: try ONNX first, then sentence-transformers, then keyword
+    # Auto-detect: try ONNX first, then sentence-transformers, then nomic, bge, remote, keyword
     try:
         import onnxruntime  # noqa: F401
         from huggingface_hub import hf_hub_download  # noqa: F401
@@ -480,6 +763,51 @@ def auto_detect_provider(
             return provider
     except Exception as e:
         logger.debug("Sentence Transformers not available: %s", e)
+
+    # Try Nomic Embed (ONNX)
+    try:
+        provider = NomicEmbedding()
+        provider._inner._ensure_initialized()
+        logger.info("Using Nomic Embedding provider")
+        return provider
+    except Exception as e:
+        logger.debug("Nomic Embed not available: %s", e)
+
+    # Try BGE Embed (ONNX)
+    try:
+        provider = BGEEmbedding()
+        provider._inner._ensure_initialized()
+        logger.info("Using BGE Embedding provider")
+        return provider
+    except Exception as e:
+        logger.debug("BGE Embed not available: %s", e)
+
+    # Try OpenAI Embeddings
+    if os.environ.get("OPENAI_API_KEY"):
+        try:
+            provider = OpenAIEmbedding(dimension=dimension)
+            logger.info("Using OpenAI Embedding provider")
+            return provider
+        except Exception as e:
+            logger.debug("OpenAI Embeddings not available: %s", e)
+
+    # Try Cohere Embeddings
+    if os.environ.get("COHERE_API_KEY"):
+        try:
+            provider = CohereEmbedding(dimension=dimension)
+            logger.info("Using Cohere Embedding provider")
+            return provider
+        except Exception as e:
+            logger.debug("Cohere Embeddings not available: %s", e)
+
+    # Try Jina Embeddings
+    if os.environ.get("JINA_API_KEY"):
+        try:
+            provider = JinaEmbedding(dimension=dimension)
+            logger.info("Using Jina Embedding provider")
+            return provider
+        except Exception as e:
+            logger.debug("Jina Embeddings not available: %s", e)
 
     logger.info("Using keyword embedding fallback (no ML model)")
     return KeywordEmbedding(dimension=dimension)

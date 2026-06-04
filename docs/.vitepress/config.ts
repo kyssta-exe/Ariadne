@@ -65,8 +65,10 @@ export default defineConfig({
         text: 'Advanced',
         items: [
           { text: 'Architecture', link: '/guide/architecture' },
+          { text: 'Providers', link: '/guide/providers' },
           { text: 'Embeddings', link: '/guide/embeddings' },
           { text: 'Migration', link: '/guide/migration' },
+          { text: 'Graph Visualization', link: '/guide/visualization' },
           { text: 'REST API', link: '/guide/rest-api' },
           { text: 'Observability', link: '/guide/observability' },
         ],

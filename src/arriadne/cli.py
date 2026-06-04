@@ -220,6 +220,72 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export memories to JSON or markdown."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+
+        if args.format == "markdown":
+            result = mem.export_markdown(args.path)
+        else:
+            result = mem.export_json(args.path)
+
+        mem.close()
+
+        if "error" in result:
+            print(f"Export error: {result['error']}", file=sys.stderr)
+            return 1
+
+        exported = result.get("exported", 0)
+        print(f"Exported {exported} memories to {args.path}")
+        if "edges" in result:
+            print(f"  Edges: {result['edges']}")
+        if "entities" in result:
+            print(f"  Entities: {result['entities']}")
+        return 0
+
+    except Exception as e:
+        print(f"Export error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Import memories from file."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+
+        source_path = Path(args.path)
+        if not source_path.exists():
+            print(f"File not found: {args.path}", file=sys.stderr)
+            mem.close()
+            return 1
+
+        if args.format == "markdown":
+            result = mem.import_from_markdown(str(source_path))
+        elif args.format == "text":
+            result = mem.import_from_text(str(source_path), category=args.category)
+        else:
+            result = mem.import_json(str(source_path))
+
+        mem.close()
+
+        if "error" in result:
+            print(f"Import error: {result['error']}", file=sys.stderr)
+            return 1
+
+        imported = result.get("imported", 0)
+        skipped = result.get("skipped", 0)
+        errors = result.get("errors", 0)
+        print(f"Import complete: {imported} imported, {skipped} skipped, {errors} errors")
+        return 0
+
+    except Exception as e:
+        print(f"Import error: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Start the Ariadne HTTP server."""
     try:
@@ -427,6 +493,17 @@ def main(argv: list[str] | None = None) -> int:
     search_parser.add_argument("--type", help="Filter by memory type")
     search_parser.add_argument("--min-importance", type=float, help="Minimum importance")
 
+    # export
+    export_parser = subparsers.add_parser("export", help="Export memories to JSON or markdown")
+    export_parser.add_argument("path", help="Output file path")
+    export_parser.add_argument("--format", choices=["json", "markdown"], default="json", help="Export format")
+
+    # import
+    import_parser = subparsers.add_parser("import", help="Import memories from file")
+    import_parser.add_argument("path", help="Input file path")
+    import_parser.add_argument("--format", choices=["json", "text", "markdown"], default="json", help="Import format")
+    import_parser.add_argument("--category", default="semantic", help="Category for imported memories")
+
     # stats
     subparsers.add_parser("stats", help="Show database statistics")
 
@@ -471,6 +548,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_stats(args)
         case "migrate":
             return cmd_migrate(args)
+        case "export":
+            return cmd_export(args)
+        case "import":
+            return cmd_import(args)
         case "serve":
             return cmd_serve(args)
         case "status":

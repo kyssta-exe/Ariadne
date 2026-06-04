@@ -1,0 +1,388 @@
+{
+  "1000": {
+    "Ariadne": {
+      "insert_batch": {
+        "name": "insert_batch",
+        "median": 549.197,
+        "mean": 549.197,
+        "p50": 549.197,
+        "p95": 561.773,
+        "p99": 562.891,
+        "unit": "ms",
+        "n": 2,
+        "metadata": {
+          "n_memories": 1000,
+          "throughput_per_sec": 1820.8
+        }
+      },
+      "insert_single": {
+        "name": "insert_single",
+        "median": 0.665,
+        "mean": 0.807,
+        "p50": 0.665,
+        "p95": 0.909,
+        "p99": 4.988,
+        "unit": "ms",
+        "n": 200,
+        "metadata": {}
+      },
+      "vector_search": {
+        "name": "vector_search",
+        "median": 0.229,
+        "mean": 0.238,
+        "p50": 0.229,
+        "p95": 0.27,
+        "p99": 0.305,
+        "unit": "ms",
+        "n": 100,
+        "metadata": {}
+      },
+      "fts_search": {
+        "name": "fts_search",
+        "median": 0.665,
+        "mean": 0.815,
+        "p50": 0.665,
+        "p95": 1.538,
+        "p99": 1.987,
+        "unit": "ms",
+        "n": 10,
+        "metadata": {}
+      },
+      "hybrid_search": {
+        "name": "hybrid_search",
+        "median": 1.407,
+        "mean": 1.868,
+        "p50": 1.407,
+        "p95": 3.523,
+        "p99": 3.937,
+        "unit": "ms",
+        "n": 5,
+        "metadata": {}
+      },
+      "dedup_check": {
+        "name": "dedup_check",
+        "median": 0.019,
+        "mean": 0.025,
+        "p50": 0.019,
+        "p95": 0.046,
+        "p99": 0.051,
+        "unit": "ms",
+        "n": 10,
+        "metadata": {}
+      },
+      "update_delete": {
+        "name": "update_delete",
+        "median": 0.246,
+        "mean": 0.361,
+        "p50": 0.246,
+        "p95": 0.532,
+        "p99": 4.207,
+        "unit": "ms",
+        "n": 100,
+        "metadata": {}
+      },
+      "graph_traversal": {
+        "name": "graph_traversal",
+        "median": 0.224,
+        "mean": 0.248,
+        "p50": 0.224,
+        "p95": 0.35,
+        "p99": 0.362,
+        "unit": "ms",
+        "n": 4,
+        "metadata": {}
+      },
+      "concurrent_insert": {
+        "name": "concurrent_insert",
+        "median": 311.793,
+        "mean": 311.793,
+        "p50": 311.793,
+        "p95": 311.793,
+        "p99": 311.793,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "threads": 4,
+          "errors": 0,
+          "n_memories": 1000
+        }
+      },
+      "search_under_pressure": {
+        "name": "search_under_pressure",
+        "median": 310.008,
+        "mean": 310.008,
+        "p50": 310.008,
+        "p95": 310.008,
+        "p99": 310.008,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "insert_errors": 0,
+          "search_errors": 0,
+          "search_queries": 50,
+          "search_p50_ms": 0.32
+        }
+      }
+    },
+    "ChromaDB": {
+      "insert_batch": {
+        "name": "insert_batch",
+        "median": 639.895,
+        "mean": 639.895,
+        "p50": 639.895,
+        "p95": 654.645,
+        "p99": 655.956,
+        "unit": "ms",
+        "n": 2,
+        "metadata": {
+          "n_memories": 1000,
+          "throughput_per_sec": 1562.8
+        }
+      },
+      "insert_single": {
+        "name": "insert_single",
+        "median": 14.772,
+        "mean": 16.176,
+        "p50": 14.772,
+        "p95": 26.193,
+        "p99": 30.938,
+        "unit": "ms",
+        "n": 200,
+        "metadata": {}
+      },
+      "vector_search": {
+        "name": "vector_search",
+        "median": 1.844,
+        "mean": 2.022,
+        "p50": 1.844,
+        "p95": 2.645,
+        "p99": 4.559,
+        "unit": "ms",
+        "n": 100,
+        "metadata": {}
+      },
+      "fts_search": {
+        "name": "fts_search",
+        "median": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "status": "N/A"
+        }
+      },
+      "hybrid_search": {
+        "name": "hybrid_search",
+        "median": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "status": "N/A"
+        }
+      },
+      "dedup_check": {
+        "name": "dedup_check",
+        "median": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "status": "N/A"
+        }
+      },
+      "update_delete": {
+        "name": "update_delete",
+        "median": 5.283,
+        "mean": 6.195,
+        "p50": 5.283,
+        "p95": 13.436,
+        "p99": 21.226,
+        "unit": "ms",
+        "n": 100,
+        "metadata": {}
+      },
+      "graph_traversal": {
+        "name": "graph_traversal",
+        "median": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "status": "N/A"
+        }
+      },
+      "concurrent_insert": {
+        "name": "concurrent_insert",
+        "median": 14421.352,
+        "mean": 14421.352,
+        "p50": 14421.352,
+        "p95": 14421.352,
+        "p99": 14421.352,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "threads": 4,
+          "errors": 0,
+          "n_memories": 1000
+        }
+      },
+      "search_under_pressure": {
+        "name": "search_under_pressure",
+        "median": 8058.028,
+        "mean": 8058.028,
+        "p50": 8058.028,
+        "p95": 8058.028,
+        "p99": 8058.028,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "insert_errors": 0,
+          "search_errors": 0,
+          "search_queries": 50,
+          "search_p50_ms": 11.53
+        }
+      }
+    },
+    "sqlite-vec": {
+      "insert_batch": {
+        "name": "insert_batch",
+        "median": 52.145,
+        "mean": 52.145,
+        "p50": 52.145,
+        "p95": 56.408,
+        "p99": 56.787,
+        "unit": "ms",
+        "n": 2,
+        "metadata": {
+          "n_memories": 1000,
+          "throughput_per_sec": 19177.1
+        }
+      },
+      "insert_single": {
+        "name": "insert_single",
+        "median": 1.426,
+        "mean": 1.627,
+        "p50": 1.426,
+        "p95": 2.497,
+        "p99": 6.067,
+        "unit": "ms",
+        "n": 200,
+        "metadata": {}
+      },
+      "vector_search": {
+        "name": "vector_search",
+        "median": 0.701,
+        "mean": 0.75,
+        "p50": 0.701,
+        "p95": 0.784,
+        "p99": 2.005,
+        "unit": "ms",
+        "n": 100,
+        "metadata": {}
+      },
+      "fts_search": {
+        "name": "fts_search",
+        "median": 0.024,
+        "mean": 0.047,
+        "p50": 0.024,
+        "p95": 0.143,
+        "p99": 0.209,
+        "unit": "ms",
+        "n": 10,
+        "metadata": {}
+      },
+      "hybrid_search": {
+        "name": "hybrid_search",
+        "median": 1.084,
+        "mean": 1.087,
+        "p50": 1.084,
+        "p95": 1.386,
+        "p99": 1.444,
+        "unit": "ms",
+        "n": 5,
+        "metadata": {}
+      },
+      "dedup_check": {
+        "name": "dedup_check",
+        "median": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "status": "N/A"
+        }
+      },
+      "update_delete": {
+        "name": "update_delete",
+        "median": 0.748,
+        "mean": 0.752,
+        "p50": 0.748,
+        "p95": 0.987,
+        "p99": 1.04,
+        "unit": "ms",
+        "n": 100,
+        "metadata": {}
+      },
+      "graph_traversal": {
+        "name": "graph_traversal",
+        "median": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "status": "N/A"
+        }
+      },
+      "concurrent_insert": {
+        "name": "concurrent_insert",
+        "median": 34.988,
+        "mean": 34.988,
+        "p50": 34.988,
+        "p95": 34.988,
+        "p99": 34.988,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "threads": 4,
+          "errors": 4,
+          "n_memories": 1000
+        }
+      },
+      "search_under_pressure": {
+        "name": "search_under_pressure",
+        "median": 0.809,
+        "mean": 0.809,
+        "p50": 0.809,
+        "p95": 0.809,
+        "p99": 0.809,
+        "unit": "ms",
+        "n": 1,
+        "metadata": {
+          "insert_errors": 1,
+          "search_errors": 1,
+          "search_queries": 0,
+          "search_p50_ms": 0
+        }
+      }
+    }
+  }
+}
