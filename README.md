@@ -302,3 +302,9 @@ Full documentation at [the docs site](https://github.com/kyssta-exe/Ariadne/tree
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Powered by <a href="https://mantes.net">Mantes</a></sub>
+</p>

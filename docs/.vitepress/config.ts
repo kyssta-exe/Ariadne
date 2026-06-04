@@ -62,7 +62,7 @@ export default defineConfig({
 
     footer: {
       message: 'Released under the MIT License.',
-      copyright: 'Copyright © 2026 Kyssta',
+      copyright: 'Powered by <a href="https://mantes.net" target="_blank">Mantes</a>',
     },
 
     search: {
