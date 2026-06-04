@@ -50,6 +50,12 @@ class AriadneConfig:
     batch_size: int = 1000
     wal_autocheckpoint: int = 1000
     fts_tokenizer: str = "porter unicode61"
+    # Embedding provider settings
+    embedding_provider: str | None = None  # "onnx", "sentence-transformers", "keyword", None=auto
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_max_length: int = 512
+    # Persistent dedup settings
+    dedup_persist: bool = True  # Store MinHash signatures in SQLite for crash recovery
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""

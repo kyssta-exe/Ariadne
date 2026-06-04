@@ -45,22 +45,60 @@ def _hash_content(content: str) -> str:
 _FTS_WORD_RE = re.compile(r"\w+")
 
 
+# Common English suffixes to strip for FTS5 query matching.
+# FTS5 porter stemmer does not handle all suffixes correctly (e.g., "deployment"
+# fails to stem to "deploy"). We strip these at query time so the root form
+# matches the already-stemmed indexed content.
+# Ordered by length (longest first) to strip the most specific suffix.
+_FTS_SUFFIXES = (
+    "fulness", "ousness", "iveness", "biliti", "ization",
+    "ational", "ization", "ation", "tion", "sion",
+    "ment", "ness", "able", "ible", "ence", "ance",
+    "less", "ous", "ive", "ful",
+)
+
+
+def _strip_english_suffix(word: str) -> str:
+    """Strip common English suffixes to get root form for FTS matching.
+
+    This handles the gap where SQLite FTS5 porter stemmer doesn't stem
+    all suffixes correctly (e.g., "deployment" stays as-is instead of
+    becoming "deploy").
+    """
+    lower = word.lower()
+    for suffix in _FTS_SUFFIXES:
+        if lower.endswith(suffix) and len(lower) - len(suffix) >= 4:
+            return lower[: -len(suffix)]
+    return lower
+
+
 def _fts_escape(query: str) -> str:
-    """Escape FTS5 special characters and expand into OR terms.
+    """Escape FTS5 special characters and expand into prefix-matching OR terms.
 
-    Each word is quoted individually to handle special characters,
-    then joined with OR for broad matching.
-
-    Optimization: Uses pre-compiled _FTS_WORD_RE pattern instead of
-    re.findall(r"\\w+", query) to avoid re-compilation on every search call.
+    Each word gets its root form via suffix stripping, then quoted with '*'
+    for prefix matching. Both the original word and the root are included
+    when they differ, so FTS porter stemming works for words it handles
+    correctly, and our suffix stripping fills the gaps.
     """
     words = _FTS_WORD_RE.findall(query)
     if not words:
         return '""'
     escaped = []
+    seen: set[str] = set()
     for word in words:
         safe = word.replace('"', '""')
-        escaped.append(f'"{safe}"')
+        lower = safe.lower()
+        root = _strip_english_suffix(safe)
+        # Add root form (prefix match) — this is the reliable fallback
+        if root not in seen:
+            escaped.append(f'"{root}"*')
+            seen.add(root)
+        # Also add original word if different from root (for porter-native matching)
+        if lower not in seen:
+            escaped.append(f'"{lower}"')
+            seen.add(lower)
+    if not escaped:
+        return '""'
     return " OR ".join(escaped)
 
 
@@ -1013,20 +1051,20 @@ class AriadneDB:
             hops = min(hops, self._config.max_graph_depth)
 
             edge_filter = ""
-            params: list[Any] = [source_id, hops, hops]
+            params: list[Any] = [source_id, hops, hops, hops]
             if edge_type:
                 edge_filter = "AND e.edge_type = ?"
                 params.append(edge_type)
 
-            # Recursive CTE for BFS
+            # Recursive CTE for BFS (bidirectional traversal)
             query = f"""
                 WITH RECURSIVE graph_traverse(node_id, depth) AS (
                     SELECT ?, 0
                     UNION
                     SELECT CASE
-                        WHEN gt.depth < ?
-                        THEN e.target_id
-                        ELSE e.source_id
+                        WHEN gt.depth < ? AND e.source_id = gt.node_id THEN e.target_id
+                        WHEN gt.depth < ? AND e.target_id = gt.node_id THEN e.source_id
+                        ELSE gt.node_id
                     END, gt.depth + 1
                     FROM graph_traverse gt
                     JOIN edges e ON (

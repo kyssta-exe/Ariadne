@@ -430,15 +430,15 @@ class TestVectorEdgeCases:
     @pytest.fixture(autouse=True)
     def _setup(self, empty_mem: AriadneMemory) -> None:
         """Add a few vectors to search."""
+        self._dim = empty_mem.embedding_dimension
         for i in range(5):
-            emb = np.random.randn(8).astype(np.float32)
+            emb = np.random.randn(self._dim).astype(np.float32)
             empty_mem.remember(
                 f"Vector content {i}",
                 embedding=emb.tolist(),
                 importance=0.5,
             )
         self._mem = empty_mem
-        self._dim = 8
 
     def test_wrong_dimension_embedding_raises(self) -> None:
         """Search with wrong-dimension embedding: FAISS may raise or return empty.
@@ -1070,7 +1070,8 @@ class TestCombinedEdgeCases:
 
     def test_concurrent_add_and_read(self, empty_mem: AriadneMemory) -> None:
         """Interleave adds and reads rapidly."""
-        emb = np.ones(8, dtype=np.float32)
+        dim = empty_mem.embedding_dimension
+        emb = np.ones(dim, dtype=np.float32)
         ids = []
 
         for i in range(100):

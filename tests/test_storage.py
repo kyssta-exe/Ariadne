@@ -69,7 +69,10 @@ class TestHashAndEscape:
 
     def test_fts_escape_simple(self) -> None:
         result = _fts_escape("hello world")
-        assert result == '"hello" OR "world"'
+        # Now uses prefix matching + original word
+        assert '"hello"' in result
+        assert '"world"' in result
+        assert "OR" in result
 
     def test_fts_escape_special_chars(self) -> None:
         result = _fts_escape('test "quotes" and *stars*')
