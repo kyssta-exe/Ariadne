@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
+  base: '/Ariadne/',
   title: 'Ariadne',
   description: 'Next-generation AI memory system — thread through the labyrinth of memories.',
   head: [
