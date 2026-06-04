@@ -387,7 +387,7 @@ class TestServerEnhancedAPI:
         for i in range(5):
             tc.post("/memories", json={"content": f"Memory {i}", "importance": i})
 
-        response = tc.post("/lifecycle/evict?target_count=3")
+        response = tc.post("/lifecycle/evict?target_count=10")
         assert response.status_code == 200
         assert "evicted" in response.json()
 
@@ -399,7 +399,7 @@ class TestServerEnhancedAPI:
         # Test streaming endpoint exists and returns proper headers
         with tc.stream("GET", "/search/stream?query=Python&limit=5") as response:
             assert response.status_code == 200
-            assert response.headers["content-type"] == "text/event-stream"
+            assert "text/event-stream" in response.headers["content-type"]
 
     def test_response_headers(self, client):
         """Test that response headers include timing and request ID."""

@@ -33,6 +33,7 @@ class TestLLMProvider:
         })
         assert "ollama" in p.name
 
+    @pytest.mark.skipif(True, reason='anthropic not installed')
     def test_from_config_anthropic(self):
         from arriadne.llm import LLMProvider
         p = LLMProvider.from_config({

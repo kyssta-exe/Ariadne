@@ -68,6 +68,25 @@ class TemporalFact:
         """Soft-delete this fact."""
         self.expired_at = at_time or time.time()
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to dictionary."""
+        return {
+            "fact_id": self.fact_id,
+            "text": self.text,
+            "subject": self.subject,
+            "predicate": self.predicate,
+            "object": self.object,
+            "valid_at": self.valid_at,
+            "invalid_at": self.invalid_at,
+            "expired_at": self.expired_at,
+            "reference_time": self.reference_time,
+            "confidence": self.confidence,
+            "source_memory_ids": self.source_memory_ids,
+            "metadata": self.metadata,
+            "is_current": self.is_current,
+        }
+
+
 
 class TemporalGraph:
     """

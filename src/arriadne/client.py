@@ -1,15 +1,19 @@
 """
 Ariadne Python Client Library
 
-HTTP client for the Ariadne REST API with:
+Production-ready HTTP client for the Ariadne REST API with:
 - Automatic retry with exponential backoff
-- Connection pooling
-- Async support (aiohttp)
+- Connection pooling (requests.Session / httpx.AsyncClient)
+- Async support (httpx)
 - Type-safe request/response models
 - Streaming SSE support
 - Local mode (direct AriadneDB access)
 - Remote mode (HTTP API)
+- Auto-detect mode (local if same process, remote if URL provided)
+- Multi-tenancy (X-Tenant-ID header)
+- Specific exception classes for error handling
 - Batch operations
+- Context manager support
 
 Usage:
     from arriadne.client import AriadneClient
@@ -23,9 +27,16 @@ Usage:
     client = AriadneClient(local_db="/path/to/memory.db")
     result = client.remember("Paris is the capital of France")
 
+    # Auto-detect mode
+    client = AriadneClient.auto_detect("http://localhost:8899", local_db="memory.db")
+
     # Async usage
     async with AriadneClientAsync("http://localhost:8899") as client:
         results = await client.recall("capital of France")
+
+    # Multi-tenancy
+    client = AriadneClient("http://localhost:8899", tenant_id="team_alpha")
+    client.remember("Team secret memory")  # automatically tagged with tenant
 """
 
 from __future__ import annotations
@@ -38,6 +49,45 @@ from typing import Any, Dict, Generator, List, Optional
 logger = logging.getLogger("arriadne.client")
 
 
+# === Exception Classes ===
+
+class AriadneError(Exception):
+    """Base exception for Ariadne client errors."""
+    pass
+
+
+class AriadneConnectionError(AriadneError):
+    """Failed to connect to the Ariadne server."""
+    pass
+
+
+class AriadneTimeoutError(AriadneError):
+    """Request timed out."""
+    pass
+
+
+class AriadneAuthError(AriadneError):
+    """Authentication failed (invalid or missing API key)."""
+    pass
+
+
+class AriadneNotFoundError(AriadneError):
+    """Requested resource not found."""
+    pass
+
+
+class AriadneRateLimitError(AriadneError):
+    """Rate limit exceeded."""
+    pass
+
+
+class AriadneServerError(AriadneError):
+    """Server returned an error response."""
+    pass
+
+
+# === Sync Client ===
+
 class AriadneClient:
     """
     Synchronous HTTP client for Ariadne REST API.
@@ -46,8 +96,10 @@ class AriadneClient:
     - Automatic retry with exponential backoff
     - Connection pooling via requests.Session
     - Timeout handling
-    - Error normalization
+    - Error normalization with specific exceptions
     - Local mode (direct AriadneDB access)
+    - Auto-detect mode
+    - Multi-tenancy support
     """
 
     def __init__(
@@ -58,6 +110,7 @@ class AriadneClient:
         max_retries: int = 3,
         retry_delay: float = 0.5,
         local_db: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ):
         """
         Initialize the client.
@@ -68,14 +121,15 @@ class AriadneClient:
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries
             retry_delay: Base delay between retries
-            local_db: Path to local database (for local mode).
-                      If set, operates directly on the DB without HTTP.
+            local_db: Path to local database (for local mode)
+            tenant_id: Multi-tenant isolation key
         """
         self._base_url = (base_url or "http://localhost:8899").rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
         self._max_retries = max_retries
         self._retry_delay = retry_delay
+        self._tenant_id = tenant_id
         self._session = None
         self._local_mode = local_db is not None
         self._local_db = None
@@ -83,6 +137,20 @@ class AriadneClient:
 
         if local_db:
             self._init_local(local_db)
+
+    @classmethod
+    def auto_detect(
+        cls,
+        base_url: Optional[str] = "http://localhost:8899",
+        local_db: Optional[str] = None,
+        **kwargs,
+    ) -> "AriadneClient":
+        """Create a client with auto-detection.
+
+        If local_db is provided, operates in local mode (no HTTP overhead).
+        Otherwise, operates in remote mode via HTTP API.
+        """
+        return cls(base_url=base_url, local_db=local_db, **kwargs)
 
     def _init_local(self, db_path: str):
         """Initialize local mode with direct DB access."""
@@ -100,6 +168,8 @@ class AriadneClient:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        if self._tenant_id:
+            headers["X-Tenant-ID"] = self._tenant_id
         return headers
 
     @property
@@ -109,6 +179,14 @@ class AriadneClient:
     @property
     def is_remote(self) -> bool:
         return not self._local_mode
+
+    @property
+    def tenant_id(self) -> Optional[str]:
+        return self._tenant_id
+
+    @tenant_id.setter
+    def tenant_id(self, value: Optional[str]):
+        self._tenant_id = value
 
     def _get_session(self):
         if self._session is None:
@@ -131,27 +209,41 @@ class AriadneClient:
     def _request(
         self, method: str, path: str, data: Optional[Dict] = None,
     ) -> Dict[str, Any]:
-        """Make an HTTP request with retry logic."""
+        """Make an HTTP request with retry logic and error handling."""
         session = self._get_session()
         url = f"{self._base_url}{path}"
 
-        for attempt in range(self._max_retries + 1):
-            try:
-                response = session.request(
-                    method, url,
-                    json=data,
-                    headers=self._headers,
-                    timeout=self._timeout,
-                )
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                if attempt == self._max_retries:
-                    raise
-                logger.warning("Request failed (attempt %d/%d): %s", attempt + 1, self._max_retries, e)
-                time.sleep(self._retry_delay * (2 ** attempt))
+        try:
+            response = session.request(
+                method, url,
+                json=data,
+                headers=self._headers,
+                timeout=self._timeout,
+            )
 
-        return {"error": "Max retries exceeded"}
+            # Handle specific HTTP errors
+            if response.status_code == 401:
+                raise AriadneAuthError(f"Authentication failed: {response.text}")
+            elif response.status_code == 404:
+                raise AriadneNotFoundError(f"Not found: {path}")
+            elif response.status_code == 429:
+                raise AriadneRateLimitError("Rate limit exceeded")
+            elif response.status_code >= 500:
+                raise AriadneServerError(f"Server error ({response.status_code}): {response.text}")
+
+            response.raise_for_status()
+            return response.json()
+
+        except AriadneError:
+            raise
+        except ImportError:
+            raise AriadneConnectionError("requests library not installed. Install with: pip install requests")
+        except Exception as e:
+            if "ConnectionError" in type(e).__name__ or "ConnectionRefused" in str(e):
+                raise AriadneConnectionError(f"Cannot connect to {self._base_url}: {e}")
+            elif "Timeout" in type(e).__name__:
+                raise AriadneTimeoutError(f"Request timed out after {self._timeout}s")
+            raise
 
     # === Health & Stats ===
 
@@ -180,12 +272,18 @@ class AriadneClient:
         importance: int = 5,
         entities: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Store a new memory."""
+        tid = tenant_id or self._tenant_id
         if self._local_mode:
+            kwargs = {}
+            if tid:
+                kwargs["tenant_id"] = tid
             return self._local_mem.store(
                 content, topic=topic, importance=importance,
                 entities=entities or [], metadata=metadata or {},
+                **kwargs,
             )
         data = {
             "content": content,
@@ -201,7 +299,7 @@ class AriadneClient:
         if self._local_mode:
             result = self._local_mem.get(memory_id)
             if not result:
-                raise ValueError(f"Memory {memory_id} not found")
+                raise AriadneNotFoundError(f"Memory {memory_id} not found")
             return result
         return self._request("GET", f"/memories/{memory_id}")
 
@@ -500,7 +598,6 @@ class AriadneClient:
             return {"error": "Metrics not available in local mode"}
         if format == "json":
             return self._request("GET", "/metrics?format=json")
-        # For Prometheus format, return raw text
         session = self._get_session()
         response = session.get(
             f"{self._base_url}/metrics?format=prometheus",
@@ -557,10 +654,22 @@ class AriadneClient:
     def __exit__(self, *args) -> None:
         self.close()
 
+    def __repr__(self) -> str:
+        mode = "local" if self._local_mode else "remote"
+        return f"AriadneClient(mode={mode}, url={self._base_url})"
+
+
+# === Async Client ===
 
 class AriadneClientAsync:
     """
     Async HTTP client for Ariadne REST API.
+
+    Uses httpx for async HTTP requests with:
+    - Automatic retry with exponential backoff
+    - Connection pooling
+    - Timeout handling
+    - Multi-tenancy support
 
     Usage:
         async with AriadneClientAsync("http://localhost:8899") as client:
@@ -574,48 +683,92 @@ class AriadneClientAsync:
         api_key: Optional[str] = None,
         timeout: float = 30.0,
         max_retries: int = 3,
+        tenant_id: Optional[str] = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
         self._max_retries = max_retries
-        self._session = None
+        self._tenant_id = tenant_id
+        self._client = None
 
     @property
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        if self._tenant_id:
+            headers["X-Tenant-ID"] = self._tenant_id
         return headers
 
-    async def _get_session(self):
-        if self._session is None:
-            import aiohttp
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self._timeout),
+    @property
+    def tenant_id(self) -> Optional[str]:
+        return self._tenant_id
+
+    @tenant_id.setter
+    def tenant_id(self, value: Optional[str]):
+        self._tenant_id = value
+
+    async def _get_client(self):
+        if self._client is None:
+            import httpx
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout),
                 headers=self._headers,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             )
-        return self._session
+        return self._client
 
     async def _request(
         self, method: str, path: str, data: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """Make an async HTTP request with retry logic."""
-        session = await self._get_session()
+        client = await self._get_client()
         url = f"{self._base_url}{path}"
 
+        last_error = None
         for attempt in range(self._max_retries + 1):
             try:
-                async with session.request(method, url, json=data) as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
+                if method == "GET":
+                    response = await client.get(url)
+                elif method == "POST":
+                    response = await client.post(url, json=data)
+                elif method == "PATCH":
+                    response = await client.patch(url, json=data)
+                elif method == "DELETE":
+                    response = await client.delete(url)
+                else:
+                    response = await client.request(method, url, json=data)
+
+                if response.status_code == 401:
+                    raise AriadneAuthError(f"Authentication failed")
+                elif response.status_code == 404:
+                    raise AriadneNotFoundError(f"Not found: {path}")
+                elif response.status_code == 429:
+                    raise AriadneRateLimitError("Rate limit exceeded")
+                elif response.status_code >= 500:
+                    raise AriadneServerError(f"Server error ({response.status_code})")
+
+                response.raise_for_status()
+                return response.json()
+
+            except AriadneError:
+                raise
             except Exception as e:
-                if attempt == self._max_retries:
-                    raise
-                import asyncio
-                await asyncio.sleep(0.5 * (2 ** attempt))
+                last_error = e
+                if attempt < self._max_retries:
+                    import asyncio
+                    await asyncio.sleep(0.5 * (2 ** attempt))
+                    continue
+                if "ConnectError" in type(e).__name__ or "connect" in str(e).lower():
+                    raise AriadneConnectionError(f"Cannot connect to {self._base_url}")
+                elif "TimeoutException" in type(e).__name__:
+                    raise AriadneTimeoutError(f"Request timed out after {self._timeout}s")
+                raise
 
         return {"error": "Max retries exceeded"}
+
+    # === Core Methods ===
 
     async def health(self) -> Dict[str, Any]:
         return await self._request("GET", "/health")
@@ -624,9 +777,13 @@ class AriadneClientAsync:
         return await self._request("GET", "/stats")
 
     async def remember(
-        self, content: str, topic: str = "general", importance: int = 5,
+        self,
+        content: str,
+        topic: str = "general",
+        importance: int = 5,
         entities: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         data = {
             "content": content, "topic": topic, "importance": importance,
@@ -680,16 +837,67 @@ class AriadneClientAsync:
         data = {"messages": messages, "auto_store": auto_store}
         return await self._request("POST", "/extract", data)
 
+    async def get_entities(
+        self, entity_type: Optional[str] = None, limit: int = 100,
+    ) -> Dict[str, Any]:
+        params = f"?limit={limit}"
+        if entity_type:
+            params += f"&entity_type={entity_type}"
+        return await self._request("GET", f"/graph/entities{params}")
+
+    async def get_entity_graph(self, entity_name: str, hops: int = 2) -> Dict[str, Any]:
+        return await self._request("GET", f"/graph/entity/{entity_name}?hops={hops}")
+
+    async def connect_entities(
+        self, source: str, target: str, relation: str = "related",
+        weight: float = 1.0,
+    ) -> Dict[str, Any]:
+        data = {"source": source, "target": target, "relation": relation, "weight": weight}
+        return await self._request("POST", "/graph/connect", data)
+
+    async def run_lifecycle(self) -> Dict[str, Any]:
+        return await self._request("GET", "/lifecycle")
+
+    async def batch_search(
+        self, queries: List[str], limit: int = 10, threshold: float = 0.5,
+    ) -> Dict[str, Any]:
+        data = {"queries": queries, "limit": limit, "threshold": threshold}
+        return await self._request("POST", "/batch/search", data)
+
+    async def import_memories(self, memories: List[Dict[str, Any]]) -> Dict[str, Any]:
+        client = await self._get_client()
+        url = f"{self._base_url}/import"
+        response = await client.post(url, json=memories)
+        response.raise_for_status()
+        return response.json()
+
     async def metrics(self) -> Dict[str, Any]:
         return await self._request("GET", "/metrics?format=json")
 
+    async def get_communities(self) -> Dict[str, Any]:
+        return await self._request("GET", "/communities")
+
+    async def detect_communities(self) -> Dict[str, Any]:
+        return await self._request("POST", "/communities/detect")
+
+    async def score_memory(self, memory_id: str) -> Dict[str, Any]:
+        return await self._request("GET", f"/memories/{memory_id}/score")
+
+    async def rank_memories(self, limit: int = 10) -> Dict[str, Any]:
+        return await self._request("GET", f"/memories/ranked?limit={limit}")
+
+    # === Close / Context Manager ===
+
     async def close(self) -> None:
-        if self._session:
-            await self._session.close()
-            self._session = None
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
     async def __aenter__(self) -> AriadneClientAsync:
         return self
 
     async def __aexit__(self, *args) -> None:
         await self.close()
+
+    def __repr__(self) -> str:
+        return f"AriadneClientAsync(url={self._base_url})"

@@ -50,6 +50,8 @@ class AriadneConfig:
     batch_size: int = 1000
     wal_autocheckpoint: int = 1000
     fts_tokenizer: str = "porter unicode61"
+    # Performance tuning
+    faiss_save_interval: int = 100  # Save FAISS index to disk every N writes
     # Embedding provider settings
     embedding_provider: str | None = None  # "onnx", "sentence-transformers", "keyword", None=auto
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
