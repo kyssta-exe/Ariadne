@@ -14,7 +14,8 @@ Memory for AI agents. Sub-millisecond search. Zero infrastructure.
 ```python
 from arriadne import AriadneMemory
 
-mem = AriadneMemory(db_path="memory.db", embedding_dim=384)
+mem = AriadneMemory(db_path="memory.db")
+# Auto-detects ONNX embeddings — zero config
 
 mem.remember("VPS has 4 cores, 8GB RAM", importance=0.8)
 
@@ -31,9 +32,10 @@ pip install arriadne
 
 | | Ariadne | Mnemosyne | Mem0 | ChromaDB |
 |---|:---:|:---:|:---:|:---:|
-| Vector search | **0.89ms** | 153ms | 12ms | 8ms |
+| Vector search | **0.83ms** | 153ms | 12ms | 8ms |
 | Hybrid search | ✅ RRF | ❌ | ❌ | ⚠️ basic |
 | Knowledge graph | ✅ BFS | ⚠️ basic | ❌ | ❌ |
+| Auto-embeddings | ✅ ONNX | ❌ | ✅ cloud | ❌ |
 | Auto-dedup | ✅ MinHash | ❌ | ❌ | ❌ |
 | Runs locally | ✅ | ✅ | ❌ | ✅ |
 | No daemon | ✅ | ✅ | ❌ | ❌ |
@@ -42,115 +44,130 @@ pip install arriadne
 
 ## Features
 
-### 0.89ms Vector Search
+### 0.83ms Vector Search
 
 FAISS-powered. 12× faster than sqlite-vec. Auto-upgrades from exact to approximate search as your data grows.
 
 | Engine | 10K vectors |
 |--------|:-----------:|
-| FAISS (Ariadne) | **0.89ms** |
+| FAISS (Ariadne) | **0.83ms** |
 | sqlite-vec | 10.5ms |
 
 ### Hybrid Retrieval
 
-Vector similarity + BM25 keywords + graph traversal, fused with Reciprocal Rank Fusion. 90%+ recall@10 (with semantic embeddings).
+Vector similarity + BM25 keywords fused with Reciprocal Rank Fusion.
 
 ```python
 results = mem.recall("how to deploy to production", k=5)
-# Searches both "deploy" (keyword) and semantic similarity in parallel
+# Searches both keyword and semantic similarity, fuses with RRF
+for r in results:
+    print(f"[{r['search_type']}] {r['content'][:80]}")
 ```
+
+### Zero-Config Embeddings
+
+Auto-downloads a quantized ONNX model on first use (~90MB). No API keys, no cloud, works offline.
+
+```python
+# Just works — no embedding_provider parameter needed
+mem = AriadneMemory("memory.db")
+mem.remember("Paris is the capital of France")  # auto-embedded
+```
+
+Falls back to keyword matching if ONNX is unavailable.
 
 ### Knowledge Graph
 
-Typed entities and relationships with multi-hop traversal via SQLite recursive CTEs:
+BFS graph traversal with typed, weighted edges. Bidirectional — edges are traversed in both directions.
 
 ```python
-mem.add_edge("WebApp", "API", edge_type="depends_on")
-mem.add_edge("API", "Database", edge_type="depends_on")
-mem.graph("WebApp", hops=2)  # → [API, Database]
+mem.add_edge("Paris", "France", "located_in")
+mem.add_edge("Nginx", "VPS", "runs_on")
+g = mem.graph("VPS", hops=2)
+# Returns: VPS ↔ Nginx, VPS ↔ France (via Paris)
 ```
-
-### Cognitive Retention
-
-Ebbinghaus forgetting curve with stability growth on each access. Priority-weighted scoring from importance, recency, and access count. Memories strengthen with use, fade without it.
 
 ### Auto-Deduplication
 
-MinHash LSH catches near-duplicates at 1.25ms before they enter the system.
-
----
-
-## Performance
-
-Benchmarked on a 4-core 8GB VPS, 10K memories, 384-dim embeddings:
-
-| Operation | Latency |
-|-----------|---------|
-| Vector search (FAISS) | **0.89ms** |
-| Keyword search (FTS5) | **1.74ms** |
-| Hybrid search (RRF) | **2.46ms** |
-| Dedup check (MinHash) | **1.25ms** |
-|| Memory insert | **0.85ms** |
-| Graph traversal (3 hops) | **0.06ms** |
-
----
-
-## Hermes Agent Integration
-
-Ariadne works as a drop-in memory provider for [Hermes Agent](https://hermes-agent.nousresearch.com/).
-
-```bash
-# Copy plugin
-git clone https://github.com/kyssta-exe/Ariadne.git /tmp/ariadne-repo
-cp -r /tmp/ariadne-repo/plugin ~/.hermes/plugins/ariadne
-
-# Switch provider
-hermes config set memory.provider ariadne
-hermes restart
-```
-
-Full guide: [ariadne.mantes.net/guide/hermes](https://ariadne.mantes.net/guide/hermes)
-
----
-
-## Configuration
+MinHash LSH near-duplicate detection. Catches paraphrases, not just exact matches.
 
 ```python
-from arriadne import AriadneConfig, AriadneMemory
+mem.remember("The server runs Ubuntu 24.04")
+mem.remember("Ubuntu 24.04 is running on the server")
+# Second store detects near-duplicate (LSH similarity > threshold)
+```
 
-config = AriadneConfig(
-    db_path="memory.db",
-    embedding_dim=384,
-    faiss_type="auto",          # auto | flat_ip | ivf_flat
-    dedup_threshold=0.8,
-    retention_half_life=86400,  # 1 day
-)
+### Conversation Memory
 
-mem = AriadneMemory(config=config)
+Track conversations and extract structured facts automatically.
+
+```python
+mem.sync_turn("user", "Deploy the app to production")
+mem.sync_turn("assistant", "Deploying now via GitHub Actions")
+
+context = mem.get_context("deployment")  # relevant past turns
+```
+
+### Agent Tools
+
+OpenAI function-calling compatible tool definitions for any LLM.
+
+```python
+tools = AriadneMemory.get_tools()  # 6 tools: remember, recall, graph, link, forget, stats
+# Plug into any agent framework that supports function calling
+```
+
+### Memory Lifecycle
+
+Ebbinghaus forgetting curve + priority-based eviction. Memories that matter survive; noise gets cleaned up.
+
+```python
+mem.consolidate()  # merge similar memories
+mem.evict()        # remove low-priority noise
 ```
 
 ---
 
-## Documentation
+## Benchmark
 
-**[ariadne.mantes.net](https://ariadne.mantes.net)**
+Measured on a 4-core 8GB VPS with 10K memories and ONNX embeddings (all-MiniLM-L6-v2, 384-dim):
 
-- [Quick Start](https://ariadne.mantes.net/guide/quick-start)
-- [Installation](https://ariadne.mantes.net/guide/installation)
-- [Hermes Setup](https://ariadne.mantes.net/guide/hermes)
-- [Search & Retrieval](https://ariadne.mantes.net/guide/search)
-- [Knowledge Graph](https://ariadne.mantes.net/guide/graph)
-- [API Reference](https://ariadne.mantes.net/api/)
-- [Benchmarks](https://ariadne.mantes.net/benchmarks)
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+| Operation | p50 | p95 |
+|-----------|:---:|:---:|
+| Vector search | **0.83ms** | 0.95ms |
+| FTS search | **1.56ms** | 2.12ms |
+| Hybrid search | **5.07ms** | 6.78ms |
+| Graph traversal (2 hops) | **0.06ms** | — |
+| Store (with ONNX embedding) | **42ms** | — |
 
 ---
 
-<p align="center">
-  <sub>Powered by <a href="https://mantes.net">Mantes</a></sub>
-</p>
+## Install
+
+```bash
+pip install arriadne
+```
+
+Optional (for faster dev):
+```bash
+pip install "arriadne[dev]"
+```
+
+**Requirements:** Python 3.10+, SQLite (built-in). ONNX model auto-downloads on first use.
+
+---
+
+## Hermes Integration
+
+```bash
+hermes plugin install arriadne
+hermes config set memory.provider ariadne
+```
+
+---
+
+## Links
+
+- **Docs:** [ariadne.mantes.net](https://ariadne.mantes.net)
+- **PyPI:** [pypi.org/project/arriadne](https://pypi.org/project/arriadne/)
+- **GitHub:** [github.com/kyssta-exe/Ariadne](https://github.com/kyssta-exe/Ariadne)
