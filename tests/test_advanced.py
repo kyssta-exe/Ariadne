@@ -4,7 +4,6 @@ consolidation, lifecycle, and server.
 """
 
 import json
-import os
 import time
 import sqlite3
 import pytest
@@ -16,7 +15,7 @@ import pytest
 
 class TestLLMProvider:
     def test_from_config_openai(self):
-        from arriadne.llm import LLMProvider, OpenAIProvider
+        from arriadne.llm import LLMProvider
         p = LLMProvider.from_config({
             "provider": "openai",
             "model": "gpt-4o-mini",
@@ -350,7 +349,7 @@ class TestTemporalGraph:
         graph = TemporalGraph(temporal_db)
 
         # First fact
-        f1 = graph.add_fact(
+        graph.add_fact(
             text="Kyssta lives in London",
             subject="Kyssta",
             predicate="lives_in",
@@ -359,7 +358,7 @@ class TestTemporalGraph:
         )
 
         # Second fact supersedes
-        f2 = graph.add_fact(
+        graph.add_fact(
             text="Kyssta lives in Paris",
             subject="Kyssta",
             predicate="lives_in",
@@ -788,7 +787,7 @@ class TestFullPipeline:
         assert f1["is_current"] is True
 
         # Update fact
-        f2 = mem.add_temporal_fact(
+        mem.add_temporal_fact(
             text="Kyssta lives in Paris",
             subject="Kyssta",
             predicate="lives_in",

@@ -7,12 +7,9 @@ Tests for new Ariadne features:
 - Client library
 """
 
-import json
 import os
-import tempfile
 import time
 import pytest
-from unittest.mock import MagicMock, patch
 
 
 # === Community Detection Tests ===

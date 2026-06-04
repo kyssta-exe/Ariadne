@@ -31,18 +31,15 @@ import json
 import os
 import platform
 import random
-import shutil
 import sqlite3
 import sys
 import tempfile
 import threading
 import time
-import traceback
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -524,7 +521,7 @@ def bench_vector_search(adapter: SystemAdapter, memories: List[str], embeddings:
         for i in range(min(100, len(embeddings))):
             query_emb = embeddings[i]
             t0 = time.perf_counter()
-            results = adapter.vector_search(query_emb, k=10)
+            adapter.vector_search(query_emb, k=10)
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000)
         adapter.teardown()
@@ -547,7 +544,7 @@ def bench_fts_search(adapter: SystemAdapter, memories: List[str], embeddings: np
         adapter.insert_batch(memories, embeddings)
         for q in queries:
             t0 = time.perf_counter()
-            results = adapter.fts_search(q, k=10)
+            adapter.fts_search(q, k=10)
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000)
         adapter.teardown()
@@ -570,7 +567,7 @@ def bench_hybrid_search(adapter: SystemAdapter, memories: List[str], embeddings:
         for q_text, idx in queries:
             query_emb = embeddings[idx]
             t0 = time.perf_counter()
-            results = adapter.hybrid_search(q_text, query_emb, k=10)
+            adapter.hybrid_search(q_text, query_emb, k=10)
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000)
         adapter.teardown()
@@ -596,7 +593,7 @@ def bench_dedup(adapter: SystemAdapter, memories: List[str], embeddings: np.ndar
         adapter.insert_batch(all_mems, all_embs)
         for content in base:
             t0 = time.perf_counter()
-            found = adapter.dedup_check(content)
+            adapter.dedup_check(content)
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000)
         adapter.teardown()
@@ -643,7 +640,7 @@ def bench_graph_traversal(adapter: SystemAdapter) -> BenchResult:
         # Traverse from entity_0 at various hops
         for hops in [1, 2, 3, 5]:
             t0 = time.perf_counter()
-            result = adapter.graph_traverse(entities[0], hops)
+            adapter.graph_traverse(entities[0], hops)
             t1 = time.perf_counter()
             times.append((t1 - t0) * 1000)
 
@@ -858,8 +855,7 @@ def generate_markdown_report(all_results: Dict[str, Dict]) -> str:
     except Exception:
         pass
     try:
-        import sqlite_vec as _sv
-        lines.append(f"- **sqlite-vec**: 0.1.x")
+        lines.append("- **sqlite-vec**: 0.1.x")
     except Exception:
         pass
     try:

@@ -13,7 +13,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import faiss
 import numpy as np
 
 # Add src to path
@@ -210,7 +209,7 @@ def benchmark_faiss_vs_sqlite_vec():
         for _ in range(100):
             start = time.perf_counter()
             conn.execute(
-                f"SELECT rowid, distance FROM vec_memories WHERE embedding MATCH ? ORDER BY distance LIMIT 10",
+                "SELECT rowid, distance FROM vec_memories WHERE embedding MATCH ? ORDER BY distance LIMIT 10",
                 (query_blob,),
             ).fetchall()
             times.append((time.perf_counter() - start) * 1000)
@@ -444,16 +443,16 @@ def main():
 
     vs = all_results.get("vector_search", {})
     if 1000 in vs:
-        print(f"\n  Claim: '0.78ms vector search at 10K'")
+        print("\n  Claim: '0.78ms vector search at 10K'")
         print(f"  Actual: {vs[1000]['avg_ms']:.3f}ms at 1K, {vs.get('10000', {}).get('avg_ms', 'N/A')}ms at 10K")
 
     if all_results.get("faiss_vs_sqlite_vec"):
         fv = all_results["faiss_vs_sqlite_vec"]
-        print(f"\n  Claim: '196x faster than sqlite-vec'")
+        print("\n  Claim: '196x faster than sqlite-vec'")
         print(f"  Actual: {fv['faiss_ms']:.3f}ms vs {fv['sqlite_vec_ms']:.3f}ms = {fv['sqlite_vec_ms'] / fv['faiss_ms']:.1f}x")
 
     acc = all_results.get("accuracy", {})
-    print(f"\n  Claim: '92% recall@10'")
+    print("\n  Claim: '92% recall@10'")
     print(f"  Actual: {acc.get('accuracy_pct', 'N/A')}% on 10 known-fact queries")
 
 

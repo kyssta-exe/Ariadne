@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,7 +15,6 @@ from arriadne.llm import (
     GoogleGeminiProvider,
     GroqProvider,
     MistralProvider,
-    OllamaProvider,
     OpenAIProvider,
     PROVIDER_REGISTRY,
     LLMProvider,
@@ -33,7 +31,6 @@ from arriadne.embeddings import (
     NomicEmbedding,
     OnnxEmbedding,
     OpenAIEmbedding,
-    SentenceTransformerEmbedding,
     VoyageEmbedding,
     auto_detect_provider,
 )
@@ -326,7 +323,8 @@ class TestEmbeddingAvailability:
         assert embs.shape == (2, 128)
 
     def test_custom_embedding(self):
-        fn = lambda texts: [[1.0] * 10 for _ in texts]
+        def fn(texts):
+            return [[1.0] * 10 for _ in texts]
         ce = CustomEmbedding(fn, dimension=10, name="test-custom")
         assert ce.name == "test-custom"
         emb = ce.embed("hello")

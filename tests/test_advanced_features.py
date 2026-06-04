@@ -8,9 +8,6 @@ Tests for advanced Ariadne features:
 """
 import json
 import os
-import tempfile
-import time
-import pytest
 
 
 # ============================================================
@@ -22,7 +19,7 @@ class TestMemoryCategories:
 
     def test_category_config_defaults(self):
         """Test default category configurations."""
-        from arriadne.categories import MemoryCategoryManager, DEFAULT_CATEGORIES
+        from arriadne.categories import MemoryCategoryManager
 
         manager = MemoryCategoryManager()
 
@@ -159,7 +156,6 @@ class TestImportanceScoring:
     def test_importance_recomputation(self, tmp_path):
         """Test that recompute_importance updates importance scores."""
         from arriadne.interface import AriadneMemory
-        from arriadne.config import AriadneConfig
 
         db_path = str(tmp_path / "test_importance.db")
         mem = AriadneMemory(
@@ -169,8 +165,8 @@ class TestImportanceScoring:
         )
 
         # Add memories with different categories
-        r1 = mem.remember("Old semantic memory", importance=0.5, category="semantic")
-        r2 = mem.remember("Recent procedural memory", importance=0.6, category="procedural")
+        mem.remember("Old semantic memory", importance=0.5, category="semantic")
+        mem.remember("Recent procedural memory", importance=0.6, category="procedural")
 
         # Recompute importance
         updated = mem.recompute_importance()
@@ -377,7 +373,6 @@ class TestGraphVisualization:
 
     def test_dot_export(self, tmp_path):
         """Test DOT/Graphviz export."""
-        from arriadne.interface import AriadneMemory
 
         mem = self._setup_graph(tmp_path)
         dot_path = str(tmp_path / "graph.dot")
@@ -397,7 +392,6 @@ class TestGraphVisualization:
 
     def test_mermaid_export(self, tmp_path):
         """Test Mermaid diagram export."""
-        from arriadne.interface import AriadneMemory
 
         mem = self._setup_graph(tmp_path)
         mmd_path = str(tmp_path / "graph.mmd")
@@ -417,7 +411,6 @@ class TestGraphVisualization:
 
     def test_json_graph_export(self, tmp_path):
         """Test D3.js-compatible JSON graph export."""
-        from arriadne.interface import AriadneMemory
 
         mem = self._setup_graph(tmp_path)
         json_path = str(tmp_path / "graph.json")
@@ -445,7 +438,6 @@ class TestGraphVisualization:
 
     def test_graph_stats(self, tmp_path):
         """Test graph statistics computation."""
-        from arriadne.interface import AriadneMemory
 
         mem = self._setup_graph(tmp_path)
         stats = mem.get_graph_stats()
@@ -491,7 +483,6 @@ class TestConsolidation:
 
     def test_consolidate_by_topic(self, tmp_path):
         """Test topic-based consolidation."""
-        from arriadne.interface import AriadneMemory
         from arriadne.config import AriadneConfig
         from arriadne.storage import AriadneDB
 
@@ -643,7 +634,7 @@ class TestAdvancedFeaturesPipeline:
         mem.remember("Procedural low", importance=0.3, category="procedural")
 
         # Recompute importance
-        updated = mem.recompute_importance()
+        mem.recompute_importance()
 
         # Check importance stats
         stats = mem.get_importance_stats()

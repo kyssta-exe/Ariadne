@@ -14,18 +14,13 @@ Tests:
 """
 from __future__ import annotations
 
-import gc
 import json
 import os
 import random
-import shutil
 import sqlite3
 import sys
-import tempfile
 import threading
 import time
-from pathlib import Path
-from typing import Any, Dict, List
 
 import numpy as np
 import pytest
@@ -33,7 +28,7 @@ import pytest
 sys.path.insert(0, "/root/arriadne/src")
 
 from arriadne.config import AriadneConfig
-from arriadne.storage import AriadneDB, _hash_content
+from arriadne.storage import AriadneDB
 
 EMBEDDING_DIM = 384
 
@@ -145,7 +140,7 @@ class TestSearchUnderPressure:
                 for i in range(100):
                     query_emb = sample_embeddings[i % len(sample_embeddings)]
                     t0 = time.perf_counter()
-                    results = tmp_db.vector_search(query_emb, k=5)
+                    tmp_db.vector_search(query_emb, k=5)
                     t1 = time.perf_counter()
                     search_times.append((t1 - t0) * 1000)
             except Exception as e:
@@ -335,7 +330,7 @@ class TestEdgeCases:
         assert result["status"] == "created"
         mem = tmp_db.get_memory(result["memory_id"])
         assert mem["content"] == content
-        print(f"\n  Emoji content: OK")
+        print("\n  Emoji content: OK")
 
     @pytest.mark.parametrize("injection", [
         "'; DROP TABLE memories; --",
@@ -358,7 +353,7 @@ class TestEdgeCases:
 
         # Try injection via FTS search
         try:
-            results = tmp_db.fts_search(injection, k=10)
+            tmp_db.fts_search(injection, k=10)
         except sqlite3.Error:
             pass  # FTS may reject malformed queries
 
@@ -366,7 +361,7 @@ class TestEdgeCases:
         try:
             rng = np.random.RandomState(0)
             emb = rng.randn(EMBEDDING_DIM).astype(np.float32)
-            results = tmp_db.vector_search(emb, k=5)
+            tmp_db.vector_search(emb, k=5)
         except Exception:
             pass
 
@@ -389,7 +384,7 @@ class TestEdgeCases:
         ]
         for s in special:
             try:
-                result = tmp_db.add_memory(content=s)
+                tmp_db.add_memory(content=s)
             except Exception:
                 pass  # Some may fail — that's OK
         print(f"\n  Special characters ({len(special)} strings): tested")
@@ -484,7 +479,7 @@ class TestTemporalFacts:
         for t_offset in range(0, 10):
             query_time = base_time + t_offset * 86400 + 43200  # Mid-day
             t0 = time.perf_counter()
-            facts = tg.find_facts(at_time=query_time, current_only=False, limit=200)
+            tg.find_facts(at_time=query_time, current_only=False, limit=200)
             t1 = time.perf_counter()
             query_times.append((t1 - t0) * 1000)
 
@@ -541,7 +536,7 @@ class TestTemporalFacts:
         all_facts = tg.find_facts(subject="Paris", predicate="is_capital_of", current_only=False)
         assert len(all_facts) == 2
 
-        print(f"\n  Fact invalidation: OK (2 versions tracked)")
+        print("\n  Fact invalidation: OK (2 versions tracked)")
 
 
 # ─── Test: Concurrent Thread Safety ──────────────────────────────────────────
@@ -659,7 +654,7 @@ class TestFTSSearch:
         contents = [r["content"] for r in results]
         assert any("web" in c.lower() for c in contents), f"FTS missed web: {contents}"
 
-        print(f"\n  FTS accuracy: queries returned correct results")
+        print("\n  FTS accuracy: queries returned correct results")
 
     def test_fts_with_special_chars(self, tmp_db):
         """FTS should handle special characters gracefully."""
@@ -693,7 +688,7 @@ class TestVectorSearch:
         emb = rng.randn(EMBEDDING_DIM).astype(np.float32)
         results = tmp_db.vector_search(emb, k=10)
         assert results == []
-        print(f"\n  Empty index search: OK (0 results)")
+        print("\n  Empty index search: OK (0 results)")
 
 
 # ─── Run all tests if executed directly ──────────────────────────────────────
