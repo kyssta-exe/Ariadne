@@ -1,6 +1,6 @@
 ---
 title: "Deduplication — Ariadne"
-description: "MinHash LSH near-duplicate detection at 0.12ms. Automatic deduplication on memory insert."
+description: "MinHash LSH near-duplicate detection at 1.25ms. Automatic deduplication on memory insert."
 ---
 
 

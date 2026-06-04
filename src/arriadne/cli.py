@@ -177,7 +177,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
         by_type = stats.get("by_type", {})
         if by_type:
-            print(f"\n  By type:")
+            print("\n  By type:")
             for t, count in sorted(by_type.items()):
                 print(f"    {t}: {count}")
 

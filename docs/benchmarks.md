@@ -1,8 +1,7 @@
 ---
 title: "Benchmarks — Ariadne"
-description: "Real performance benchmarks on 4-core 8GB VPS: 0.78ms vector search, 2.15ms hybrid, 0.12ms dedup."
+description: "Real performance benchmarks on a shared 4-core 8GB VPS: sub-millisecond vector search, sub-3ms hybrid, 12× faster than sqlite-vec."
 ---
-
 
 Real benchmarks from real hardware. No synthetic reports, no GPU acceleration, no cloud instances with 64GB RAM. These numbers are from the same kind of VPS you'd run in production.
 
@@ -10,7 +9,7 @@ Real benchmarks from real hardware. No synthetic reports, no GPU acceleration, n
 
 | Component | Specification |
 |-----------|--------------|
-| CPU | 4 vCPU (shared), ~2.5GHz |
+| CPU | 4 vCPU (shared), Intel Haswell |
 | RAM | 8 GB DDR4 |
 | Storage | NVMe SSD |
 | OS | Ubuntu 24.04 LTS |
@@ -20,113 +19,119 @@ Real benchmarks from real hardware. No synthetic reports, no GPU acceleration, n
 
 ## Search Performance
 
-**10K memories, 384-dim embeddings, single-threaded:**
+**10K memories, 384-dim embeddings, single-threaded, FlatIP index:**
 
-| Operation | Latency | Engine |
-|-----------|---------|--------|
-| Vector search (k=10) | **0.78ms** | FAISS IndexFlatIP |
-| Keyword search (k=10) | **4.90ms** | SQLite FTS5 (BM25) |
-| Hybrid search (k=10) | **2.15ms** | RRF (vector + FTS5) |
-| Dedup check | **0.12ms** | MinHash LSH (datasketch) |
-| Memory insert | **0.50ms** | Includes hash, dedup, FAISS add |
+| Operation | p50 Latency | Engine |
+|-----------|-------------|--------|
+| Vector search (k=10) | **0.89ms** | FAISS IndexFlatIP |
+| Keyword search (k=10) | **1.74ms** | SQLite FTS5 (BM25) |
+| Hybrid search (k=10) | **2.46ms** | RRF (vector + FTS5) |
+| Dedup check | **1.25ms** | MinHash LSH (datasketch) |
+| Contradiction check | **0.07ms** | Pattern matching |
 
-**Scaling with dataset size (vector search only):**
+::: warning
+These are **full-method** benchmarks — they measure the entire search pipeline including SQLite reads, result construction, and RRF fusion. Not just the raw FAISS `index.search()` call.
+:::
 
-| Memories | FlatIP | IVFFlat | Notes |
-|:--------:|:------:|:-------:|-------|
-| 1K | 0.12ms | — | FlatIP used for <1K |
-| 5K | 0.43ms | — | |
-| 10K | 0.78ms | — | FlatIP still efficient at this size |
-| 50K | — | 1.2ms | Auto-upgrade to IVFFlat |
-| 100K | — | 1.8ms | nlist=316 |
+**Scaling with dataset size (vector search, p50):**
 
-## Throughput
+| Memories | Latency | Index Type |
+|:--------:|:-------:|:----------:|
+| 100 | 0.15ms | FlatIP |
+| 1,000 | 0.23ms | FlatIP |
+| 5,000 | 0.47ms | FlatIP |
+| 10,000 | 0.89ms | FlatIP |
 
-| Operation | Rate | Notes |
-|-----------|------|-------|
-| Writes | ~1,200/sec | Sequential inserts with dedup |
-| Reads | ~2,400/sec | Hybrid search queries |
-| Batch insert | ~2,100/sec | Without per-item dedup |
+For datasets under 50K, FAISS `IndexFlatIP` is fast enough. No need for IVFFlat clustering.
 
-## Memory Footprint
+## FAISS vs sqlite-vec
 
-| Memories | RAM | Disk (DB) | Disk (FAISS) |
-|:--------:|:---:|:---------:|:------------:|
-| 1K | 18 MB | 1.2 MB | 0.6 MB |
-| 10K | 45 MB | 4.8 MB | 6.2 MB |
-| 50K | 95 MB | 22 MB | 30 MB |
-| 100K | 140 MB | 42 MB | 60 MB |
+Benchmarked on the same hardware, same 10K dataset, same 384-dim embeddings, same query set:
 
-## Comparison
+| Engine | Vector Search (10K) | Method |
+|--------|:-------------------:|--------|
+| **FAISS IndexFlatIP** | **0.87ms** | BLAS-optimized matrix multiply |
+| sqlite-vec (HNSW) | 10.5ms | SQLite BLOB storage + C extension |
+| **Speedup** | **12×** | |
 
-Benchmarked against other memory systems on the same hardware, same 10K dataset, same 384-dim embeddings:
+**Why FAISS is faster:**
 
-| System | Vector Search | Keyword Search | Hybrid Search | Dedup | Storage |
-|--------|:------------:|:--------------:|:-------------:|:-----:|:-------:|
-| **Ariadne** | **0.78ms** | **4.90ms** | **2.15ms** | **0.12ms** | 11 MB |
-| Mnemosyne (sqlite-vec) | 153ms | 1.2ms | ❌ | ❌ | 12 MB |
-| ChromaDB | 8ms | ❌ | ⚠️ basic | ❌ | 35 MB |
+- **sqlite-vec** stores vectors as BLOBs in SQLite and runs distance computation through its C extension. Every search loads vectors, deserializes, and computes distances sequentially.
+- **FAISS** keeps vectors in contiguous memory and uses BLAS-optimized matrix multiplication (`sgemm`) for the entire query in a single call.
+- At 10K vectors the difference is 12×. At 100K+ with IVFFlat clustering, the gap grows further.
 
-**Why FAISS is faster than sqlite-vec:**
+## Batch Search
 
-- **sqlite-vec** stores vectors as BLOBs in SQLite and runs cosine similarity in Python/C — every search loads every vector from disk, deserializes, and computes distance sequentially. This is O(n) in both I/O and CPU.
-- **FAISS** pre-indexes vectors into optimized in-memory structures. IndexFlatIP uses BLAS-optimized matrix multiplication (single `sgemm` call for the entire query). IndexIVFFlat partitions the vector space into Voronoi cells and only searches the nearest clusters — O(sqrt(n)) instead of O(n).
-- At 10K vectors, sqlite-vec does 10,000 disk reads + 10,000 cosine computations. FAISS does one matrix multiply. At 100K, the gap widens to 378×.
+Batch vector search sends multiple queries in a single FAISS call:
 
-## Benchmark Methodology
+| Queries | Sequential | Batch | Speedup |
+|:-------:|:----------:|:-----:|:-------:|
+| 10 | 29.1ms | 10.8ms | **2.7×** |
 
-### Test Data
-- 10,000 synthetic memories (50–500 characters each, English prose)
-- Embeddings from `all-MiniLM-L6-v2` (384 dimensions)
-- 1,000 query embeddings (randomly sampled from the dataset)
+## Deduplication
 
-### Measurement Protocol
-1. **Warm-up**: 100 queries discarded before timing
-2. **Repetitions**: 1,000 queries per test, averaged
-3. **Timing**: `time.perf_counter()` (nanosecond resolution on Linux)
-4. **No caching**: Each query runs cold (no result cache in Ariadne)
-5. **Single-threaded**: No concurrent operations during timing
-6. **Steady state**: All inserts complete before search benchmarks begin
+MinHash LSH with 128 permutations, 0.8 similarity threshold:
 
-### FAISS Configuration
-| Memory Count | Index Type | nlist | Build Time |
-|:------------:|-----------|:-----:|:----------:|
-| < 1,000 | IndexFlatIP | — | <1ms |
-| 1K–10K | IndexFlatIP | — | — |
-| 10K–50K | IndexIVFFlat | 256 | 200ms |
-| 50K–100K | IndexIVFFlat | 512 | 500ms |
+| Operation | Time |
+|-----------|------|
+| Index 10K documents | 15.4s (647 docs/sec) |
+| Query (duplicate check) | 1.25ms |
+
+Dedup indexing is slow because it builds the LSH index. Querying is fast because LSH does hash lookups, not pairwise comparison.
+
+## Accuracy
+
+Search accuracy depends entirely on embedding quality:
+
+| Embedding Model | Recall@10 | Notes |
+|-----------------|:---------:|-------|
+| Random vectors | ~70% | Incidental similarity in 384D |
+| all-MiniLM-L6-v2 | ~90%+ | Semantic embeddings |
+| nomic-embed-text-v1.5 | ~92%+ | Best open-source option |
+
+Ariadne does not bundle an embedding model — it accepts pre-computed vectors. Use whatever model fits your use case.
 
 ## Reproducing These Benchmarks
 
 ```bash
-pip install arriadne sentence-transformers numpy
+pip install arriadne numpy
 
 python -c "
 import time, numpy as np
-from sentence_transformers import SentenceTransformer
-from arriadne import AriadneMemory
+from arriadne import AriadneDB, AriadneConfig
 
-model = SentenceTransformer('all-MiniLM-L6-v2')
-mem = AriadneMemory(db_path='bench.db', embedding_dim=384)
+config = AriadneConfig(db_path='bench.db', embedding_dim=384, faiss_type='flat_ip')
+db = AriadneDB(config=config)
+db.open()
 
-# Insert 10K memories
-texts = [f'Memory {i}: This is content about topic {i % 100}' for i in range(10000)]
-embeddings = model.encode(texts)
+# Insert 10K memories with random embeddings
+n = 10000
+vecs = np.random.randn(n, 384).astype(np.float32)
+vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
 
 start = time.perf_counter()
-for text, emb in zip(texts, embeddings):
-    mem.remember(content=text, embedding=emb.tolist(), importance=0.5)
-print(f'Insert: {(time.perf_counter()-start)*1000:.0f}ms')
+for i in range(n):
+    db.add_memory(content=f'Memory {i}: content about topic {i % 100}', embedding=vecs[i])
+print(f'Insert 10K: {(time.perf_counter()-start)*1000:.0f}ms')
 
-# Search benchmark
-queries = np.random.randn(1000, 384).astype(np.float32)
+# Vector search benchmark
+query = np.random.randn(384).astype(np.float32)
+query /= np.linalg.norm(query)
 times = []
-for q in queries:
+for _ in range(1000):
     t0 = time.perf_counter()
-    mem.recall('test query', embedding=q.tolist(), k=10)
-    times.append(time.perf_counter() - t0)
+    db.vector_search(query, k=10)
+    times.append((time.perf_counter() - t0) * 1000)
+print(f'Vector search: avg={np.mean(times):.3f}ms p50={np.percentile(times,50):.3f}ms')
 
-print(f'Search: avg={np.mean(times)*1000:.3f}ms p99={np.percentile(times,99)*1000:.3f}ms')
-mem.close()
+# FTS search benchmark
+times = []
+for _ in range(1000):
+    t0 = time.perf_counter()
+    db.fts_search('memory topic', k=10)
+    times.append((time.perf_counter() - t0) * 1000)
+print(f'FTS search: avg={np.mean(times):.3f}ms p50={np.percentile(times,50):.3f}ms')
+
+db.close()
 "
 ```

@@ -31,7 +31,7 @@ pip install arriadne
 
 | | Ariadne | Mnemosyne | Mem0 | ChromaDB |
 |---|:---:|:---:|:---:|:---:|
-| Vector search | **0.78ms** | 153ms | 12ms | 8ms |
+| Vector search | **0.89ms** | 153ms | 12ms | 8ms |
 | Hybrid search | ✅ RRF | ❌ | ❌ | ⚠️ basic |
 | Knowledge graph | ✅ BFS | ⚠️ basic | ❌ | ❌ |
 | Auto-dedup | ✅ MinHash | ❌ | ❌ | ❌ |
@@ -42,18 +42,18 @@ pip install arriadne
 
 ## Features
 
-### 0.78ms Vector Search
+### 0.89ms Vector Search
 
-FAISS-powered. 196× faster than sqlite-vec. Auto-upgrades from exact to approximate search as your data grows.
+FAISS-powered. 12× faster than sqlite-vec. Auto-upgrades from exact to approximate search as your data grows.
 
-| Engine | 10K vectors | 100K vectors |
-|--------|:-----------:|:------------:|
-| FAISS (Ariadne) | **0.78ms** | **1.8ms** |
-| sqlite-vec | 153ms | 680ms |
+| Engine | 10K vectors |
+|--------|:-----------:|
+| FAISS (Ariadne) | **0.89ms** |
+| sqlite-vec | 10.5ms |
 
 ### Hybrid Retrieval
 
-Vector similarity + BM25 keywords + graph traversal, fused with Reciprocal Rank Fusion. 92% recall@10.
+Vector similarity + BM25 keywords + graph traversal, fused with Reciprocal Rank Fusion. 90%+ recall@10 (with semantic embeddings).
 
 ```python
 results = mem.recall("how to deploy to production", k=5)
@@ -76,7 +76,7 @@ Ebbinghaus forgetting curve with stability growth on each access. Priority-weigh
 
 ### Auto-Deduplication
 
-MinHash LSH catches near-duplicates at 0.12ms before they enter the system.
+MinHash LSH catches near-duplicates at 1.25ms before they enter the system.
 
 ---
 
@@ -86,12 +86,12 @@ Benchmarked on a 4-core 8GB VPS, 10K memories, 384-dim embeddings:
 
 | Operation | Latency |
 |-----------|---------|
-| Vector search (FAISS) | **0.78ms** |
-| Keyword search (FTS5) | **4.90ms** |
-| Hybrid search (RRF) | **2.15ms** |
-| Dedup check (MinHash) | **0.12ms** |
-| Memory insert | **0.50ms** |
-| Graph traversal (3 hops) | **50ms** |
+| Vector search (FAISS) | **0.89ms** |
+| Keyword search (FTS5) | **1.74ms** |
+| Hybrid search (RRF) | **2.46ms** |
+| Dedup check (MinHash) | **1.25ms** |
+|| Memory insert | **0.85ms** |
+| Graph traversal (3 hops) | **0.06ms** |
 
 ---
 

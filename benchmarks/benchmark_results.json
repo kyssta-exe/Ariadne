@@ -1,0 +1,55 @@
+{
+  "vector_search": {
+    "100": {
+      "avg_ms": 0.152,
+      "p50_ms": 0.148,
+      "p99_ms": 0.179
+    },
+    "1000": {
+      "avg_ms": 0.24,
+      "p50_ms": 0.234,
+      "p99_ms": 0.314
+    },
+    "5000": {
+      "avg_ms": 0.469,
+      "p50_ms": 0.467,
+      "p99_ms": 0.516
+    },
+    "10000": {
+      "avg_ms": 1.134,
+      "p50_ms": 0.887,
+      "p99_ms": 5.285
+    }
+  },
+  "fts_search": {
+    "avg_ms": 2.05,
+    "p50_ms": 1.739
+  },
+  "hybrid_search": {
+    "avg_ms": 2.56,
+    "p50_ms": 2.464
+  },
+  "batch_search": {
+    "sequential_ms": 29.069,
+    "batch_ms": 10.839
+  },
+  "dedup": {
+    "index_10k_ms": 15449.8,
+    "query_ms": 1.252
+  },
+  "contradiction": {
+    "avg_ms": 0.07
+  },
+  "retention": {
+    "avg_1000_ms": 1.374
+  },
+  "faiss_vs_sqlite_vec": {
+    "faiss_ms": 0.865,
+    "sqlite_vec_ms": 10.518
+  },
+  "accuracy": {
+    "correct": 7,
+    "total": 10,
+    "accuracy_pct": 70.0
+  }
+}

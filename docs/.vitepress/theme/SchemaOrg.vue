@@ -38,7 +38,7 @@ const structuredData = computed(() => {
       programmingLanguage: 'Python',
       runtimePlatform: 'Python 3.10+',
       featureList: [
-        'FAISS vector search (0.78ms)',
+        'FAISS vector search (0.89ms)',
         'Hybrid search with Reciprocal Rank Fusion',
         'Knowledge graph with BFS traversal',
         'Ebbinghaus forgetting curve',
@@ -66,7 +66,7 @@ const structuredData = computed(() => {
           name: 'How fast is Ariadne?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: "Ariadne's FAISS vector search returns results in 0.78ms across 10,000 memories. Hybrid search (vector + keyword + graph) completes in 2.15ms. This is 196x faster than sqlite-vec.",
+            text: "Ariadne's FAISS vector search returns results in 0.89ms across 10,000 memories. Hybrid search (vector + keyword + graph) completes in 2.46ms. This is 12× faster than sqlite-vec.",
           },
         },
         {
@@ -103,7 +103,7 @@ const structuredData = computed(() => {
           name: 'What is hybrid search?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: 'Hybrid search combines vector similarity (semantic understanding) and BM25 keyword matching (exact text match), then merges results using Reciprocal Rank Fusion. 92% recall@10.',
+            text: 'Hybrid search combines vector similarity (semantic understanding) and BM25 keyword matching (exact text match), then merges results using Reciprocal Rank Fusion. 90%+ recall@10 (with semantic embeddings).',
           },
         },
         {
@@ -127,7 +127,7 @@ const structuredData = computed(() => {
           name: 'How fast is search at scale?',
           acceptedAnswer: {
             '@type': 'Answer',
-            text: '10K memories: 0.78ms (vector), 2.15ms (hybrid). 100K memories: 1.8ms (vector). FAISS auto-upgrades from exact to approximate search.',
+            text: '10K memories: 0.89ms (vector), 2.46ms (hybrid). FAISS scales sub-linearly with data size.',
           },
         },
       ],

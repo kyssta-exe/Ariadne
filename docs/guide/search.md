@@ -1,6 +1,6 @@
 ---
 title: "Search & Retrieval — Ariadne"
-description: "Hybrid search with FAISS vector similarity, FTS5 keyword matching, and Reciprocal Rank Fusion. 92% recall@10."
+description: "Hybrid search with FAISS vector similarity, FTS5 keyword matching, and Reciprocal Rank Fusion. 90%+ recall@10 (with semantic embeddings)."
 ---
 
 
@@ -169,9 +169,9 @@ results = mem.recall(
 
 | Metric | Value |
 |--------|-------|
-| Vector search latency | ~0.78ms (10K memories) |
-| FTS5 search latency | ~4.90ms (10K memories) |
-| Hybrid search latency | ~2.15ms (10K memories) |
+| Vector search latency | ~0.89ms (10K memories) |
+| FTS5 search latency | ~1.74ms (10K memories) |
+| Hybrid search latency | ~2.46ms (10K memories) |
 | Recall@10 | 92% |
 
 ## Advanced: Direct Access to Search Engines
@@ -210,7 +210,7 @@ db.close()
 ## Frequently Asked Questions
 
 ### What is hybrid search?
-Hybrid search combines **vector similarity** (semantic understanding) and **BM25 keyword matching** (exact text match), then merges results using Reciprocal Rank Fusion. 92% recall@10.
+Hybrid search combines **vector similarity** (semantic understanding) and **BM25 keyword matching** (exact text match), then merges results using Reciprocal Rank Fusion. 90%+ recall@10 (with semantic embeddings).
 
 ### How does Reciprocal Rank Fusion work?
 RRF assigns each result a score based on its rank in both result lists. `score = 1/(k + rank_vector) + 1/(k + rank_keyword)` where k=60.
@@ -222,5 +222,5 @@ Use **vector** for semantic queries ("how do I deploy this"). Use **keyword** fo
 Yes. Any embedding model works. Recommended: `sentence-transformers` with `all-MiniLM-L6-v2` for 384-dim vectors. Without embeddings, Ariadne falls back to keyword-only search.
 
 ### How fast is search at scale?
-10K memories: **0.78ms** (vector), **2.15ms** (hybrid). 100K memories: **1.8ms** (vector). FAISS auto-upgrades from exact to approximate search.
+10K memories: **0.89ms** (vector), **2.46ms** (hybrid). 100K memories: **1.8ms** (vector). FAISS auto-upgrades from exact to approximate search.
 

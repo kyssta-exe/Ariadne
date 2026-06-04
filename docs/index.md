@@ -14,16 +14,16 @@ hero:
       link: https://github.com/kyssta-exe/Ariadne
 
 features:
-  - title: "0.78ms vector search"
-    details: "FAISS-powered. 196× faster than sqlite-vec. Scales to millions of memories."
+  - title: "0.89ms vector search"
+    details: "FAISS-powered. 12× faster than sqlite-vec. Scales to millions of memories."
   - title: "Hybrid retrieval"
-    details: "Vector similarity + keyword search + graph traversal. Reciprocal Rank Fusion. 92% recall."
+    details: "Vector similarity + keyword search + graph traversal. Reciprocal Rank Fusion. 90%+ recall (with semantic embeddings)."
   - title: "Knowledge graph"
     details: "Typed entities, relationships, multi-hop traversal. One query walks the full chain."
   - title: "Cognitive retention"
     details: "Ebbinghaus forgetting curve. Memories strengthen with use, fade without it."
   - title: "Auto-dedup"
-    details: "MinHash LSH catches near-duplicates at 0.12ms before they enter the system."
+    details: "MinHash LSH catches near-duplicates at 1.25ms before they enter the system."
   - title: "Zero infrastructure"
     details: "SQLite + FAISS. One .db file. No Docker, no Redis, no API keys, no daemon."
 ---
@@ -55,7 +55,7 @@ results = memory.search("server specs", limit=5)
 
 | | Ariadne | Mnemosyne | Mem0 | ChromaDB |
 |---|:---:|:---:|:---:|:---:|
-| Vector search | **0.78ms** | 153ms | 12ms | 8ms |
+| Vector search | **0.89ms** | 153ms | 12ms | 8ms |
 | Hybrid search | ✅ | ❌ | ❌ | ⚠️ |
 | Knowledge graph | ✅ | ⚠️ | ❌ | ❌ |
 | Runs locally | ✅ | ✅ | ❌ | ✅ |

@@ -58,7 +58,27 @@ class AriadneMemory:
         )
         self._contradiction_detector = ContradictionDetector()
         self._db.open()
+        self._rebuild_dedup_index()
         logger.info("AriadneMemory initialized (db=%s)", config.db_path)
+
+    def _rebuild_dedup_index(self) -> None:
+        """Rebuild the in-memory dedup index from existing memories.
+
+        The Deduplicator is in-memory only (MinHash LSH doesn't persist).
+        On startup, we load all active memories into it so that
+        near-duplicate detection works across sessions.
+        """
+        try:
+            cursor = self._db.conn.execute(
+                "SELECT id, content FROM memories WHERE is_deleted = 0"
+            )
+            count = 0
+            for row in cursor.fetchall():
+                self._dedup.add(row[1], doc_id=str(row[0]))
+                count += 1
+            logger.info("Rebuilt dedup index with %d memories", count)
+        except Exception as e:
+            logger.warning("Failed to rebuild dedup index: %s", e)
 
     def close(self) -> None:
         """Close the memory system, saving all state."""

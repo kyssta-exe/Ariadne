@@ -429,11 +429,7 @@ class AriadneDB:
             return
         try:
             index_path = self._get_faiss_path()
-            # IVFFlat requires write_index directly
-            if isinstance(self._faiss_index, faiss.IndexIVFFlat):
-                faiss.write_index(self._faiss_index, str(index_path))
-            else:
-                faiss.write_index(self._faiss_index, str(index_path))
+            faiss.write_index(self._faiss_index, str(index_path))
             logger.debug("Saved FAISS index with %d vectors", self._faiss_index.ntotal)
         except Exception as e:
             logger.error("Failed to save FAISS index: %s", e)
@@ -498,7 +494,7 @@ class AriadneDB:
                 (content, content_hash, memory_type, importance, embedding_blob,
                  now, now, now, metadata_json),
             )
-            memory_id = cursor.lastassert_id if hasattr(cursor, 'lastassert_id') else cursor.lastrowid
+            memory_id = cursor.lastrowid
             assert memory_id is not None
             memory_id = int(memory_id)
 
@@ -554,8 +550,48 @@ class AriadneDB:
         assert entity_id is not None
         return int(entity_id)
 
+    def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Convert a SQLite Row to a memory dict."""
+        return {
+            "id": row[0],
+            "content": row[1],
+            "content_hash": row[2],
+            "memory_type": row[3],
+            "importance": row[4],
+            "created_at": row[5],
+            "updated_at": row[6],
+            "accessed_at": row[7],
+            "access_count": row[8],
+            "retention_strength": row[9],
+            "is_deleted": bool(row[10]),
+            "metadata": json.loads(row[11]) if row[11] else None,
+        }
+
+    def _read_memory(self, memory_id: int) -> dict[str, Any] | None:
+        """Read a memory WITHOUT updating access counts (read-only, fast).
+
+        Used by search methods where we don't want to touch every result's
+        access_count (which would trigger writes + commits per result).
+        """
+        assert self._conn is not None
+        try:
+            cursor = self._conn.execute(
+                """SELECT id, content, content_hash, memory_type, importance,
+                          created_at, updated_at, accessed_at, access_count,
+                          retention_strength, is_deleted, metadata
+                   FROM memories WHERE id = ?""",
+                (memory_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return self._row_to_dict(row)
+        except sqlite3.Error as e:
+            logger.error("Database error reading memory %d: %s", memory_id, e)
+            return None
+
     def get_memory(self, memory_id: int) -> dict[str, Any] | None:
-        """Retrieve a memory by ID.
+        """Retrieve a memory by ID and record the access.
 
         Args:
             memory_id: The memory's unique ID.
@@ -563,11 +599,9 @@ class AriadneDB:
         Returns:
             Memory dict with all fields, or None if not found/deleted.
 
-        Optimization: Uses a SQLite trigger (memories_access_log) to
-        auto-insert into access_log when access_count is incremented.
-        This reduces the touch operation from 2 writes (UPDATE + INSERT)
-        to a single UPDATE write, improving throughput by ~2x for
-        read-heavy workloads.
+        Note: This method writes to the access log on every call.
+        For read-only lookups (e.g., inside search results), use
+        _read_memory() instead to avoid write amplification.
         """
         assert self._conn is not None
         try:
@@ -581,7 +615,6 @@ class AriadneDB:
             )
             self._commit()
 
-            # Now read the updated data
             cursor = self._conn.execute(
                 """SELECT id, content, content_hash, memory_type, importance,
                           created_at, updated_at, accessed_at, access_count,
@@ -592,21 +625,7 @@ class AriadneDB:
             row = cursor.fetchone()
             if row is None:
                 return None
-
-            return {
-                "id": row[0],
-                "content": row[1],
-                "content_hash": row[2],
-                "memory_type": row[3],
-                "importance": row[4],
-                "created_at": row[5],
-                "updated_at": row[6],
-                "accessed_at": row[7],
-                "access_count": row[8],
-                "retention_strength": row[9],
-                "is_deleted": bool(row[10]),
-                "metadata": json.loads(row[11]) if row[11] else None,
-            }
+            return self._row_to_dict(row)
         except sqlite3.Error as e:
             logger.error("Database error getting memory %d: %s", memory_id, e)
             return None
@@ -754,7 +773,7 @@ class AriadneDB:
                 internal_id = self._reverse_id_map.get(int(idx))
                 if internal_id is None:
                     continue
-                memory = self.get_memory(internal_id)
+                memory = self._read_memory(internal_id)
                 if memory is not None and not memory["is_deleted"]:
                     memory["score"] = float(dist)
                     memory["search_type"] = "vector"
@@ -810,7 +829,7 @@ class AriadneDB:
                     internal_id = self._reverse_id_map.get(int(idx))
                     if internal_id is None:
                         continue
-                    memory = self.get_memory(internal_id)
+                    memory = self._read_memory(internal_id)
                     if memory is not None and not memory["is_deleted"]:
                         memory["score"] = float(dist)
                         memory["search_type"] = "vector_batch"
@@ -846,7 +865,7 @@ class AriadneDB:
 
             results = []
             for rowid, rank in rows:
-                memory = self.get_memory(int(rowid))
+                memory = self._read_memory(int(rowid))
                 if memory is not None and not memory["is_deleted"]:
                     memory["score"] = abs(float(rank))
                     memory["search_type"] = "fts"
@@ -926,7 +945,7 @@ class AriadneDB:
 
         results = []
         for mid in sorted_ids:
-            memory = self.get_memory(mid)
+            memory = self._read_memory(mid)
             if memory is not None and not memory["is_deleted"]:
                 memory["score"] = fused_scores[mid]
                 memory["search_type"] = "hybrid"
@@ -1033,6 +1052,11 @@ class AriadneDB:
             # Get edges between discovered nodes
             if len(nodes) > 1:
                 placeholders = ",".join("?" * len(seen_ids))
+                edge_type_filter = ""
+                edge_params: list[Any] = []
+                if edge_type:
+                    edge_type_filter = "AND e.edge_type = ?"
+                    edge_params = [edge_type]
                 edge_query = f"""
                     SELECT e.source_id, e.target_id, e.edge_type, e.weight,
                            s.name, t.name
@@ -1041,9 +1065,10 @@ class AriadneDB:
                     JOIN entities t ON t.id = e.target_id
                     WHERE e.source_id IN ({placeholders})
                       AND e.target_id IN ({placeholders})
+                      {edge_type_filter}
                 """
                 node_list = list(seen_ids)
-                cursor = self._conn.execute(edge_query, node_list + node_list)
+                cursor = self._conn.execute(edge_query, node_list + node_list + edge_params)
                 edges = []
                 for row in cursor.fetchall():
                     edges.append({

@@ -1,10 +1,10 @@
 ---
 title: "Setup with Hermes Agent — Ariadne"
-description: "Replace Mnemosyne with Ariadne in Hermes Agent. One command setup, 196x faster search, same tool names."
+description: "Replace Mnemosyne with Ariadne in Hermes Agent. One command setup, 12× faster search, same tool names."
 ---
 
 
-Ariadne replaces the default Mnemosyne memory provider in [Hermes Agent](https://hermes-agent.nousresearch.com/). 196× faster search, hybrid retrieval, knowledge graph, deduplication. Same tool names, same interface.
+Ariadne replaces the default Mnemosyne memory provider in [Hermes Agent](https://hermes-agent.nousresearch.com/). 12× faster search, hybrid retrieval, knowledge graph, deduplication. Same tool names, same interface.
 
 ---
 
@@ -22,7 +22,7 @@ ARIADENE
 - Plugin: https://github.com/kyssta-exe/Ariadne/tree/main/plugin
 
 WHAT IT IS
-Ariadne is a local memory system for AI agents. It uses FAISS for vector search (0.78ms vs Mnemosyne's 153ms), FTS5 for keywords, Reciprocal Rank Fusion to combine both, a knowledge graph with typed edges and multi-hop traversal, MinHash LSH deduplication, and an Ebbinghaus forgetting curve for retention. No cloud, no daemon, no API keys.
+Ariadne is a local memory system for AI agents. It uses FAISS for vector search (0.89ms vs Mnemosyne's 153ms), FTS5 for keywords, Reciprocal Rank Fusion to combine both, a knowledge graph with typed edges and multi-hop traversal, MinHash LSH deduplication, and an Ebbinghaus forgetting curve for retention. No cloud, no daemon, no API keys.
 
 INSTALL
 1. Install the Python package: pip install arriadne
@@ -117,13 +117,13 @@ If it says `engine: Ariadne` — you're done.
 
 | | Before (Mnemosyne) | After (Ariadne) |
 |---|---|---|
-| Vector search | 153ms (sqlite-vec) | **0.78ms** (FAISS) |
+| Vector search | 153ms (sqlite-vec) | **0.89ms** (FAISS) |
 | Hybrid search | ❌ | **FTS5 + FAISS + RRF** |
-| Dedup | ❌ | **MinHash LSH (0.12ms)** |
+| Dedup | ❌ | **MinHash LSH (1.25ms)** |
 | Knowledge graph | Basic edges | **Typed edges + BFS traversal** |
 | Retention | ❌ | **Ebbinghaus forgetting curve** |
 
-**Nothing else changes.** Same tool names (`mnemosyne_remember`, `mnemosyne_recall`, etc.), same natural language interface, same conversations. Hermes calls the same tools — Ariadne just makes them 196× faster.
+**Nothing else changes.** Same tool names (`mnemosyne_remember`, `mnemosyne_recall`, etc.), same natural language interface, same conversations. Hermes calls the same tools — Ariadne just makes them 12× faster.
 
 ---
 

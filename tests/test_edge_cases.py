@@ -6,7 +6,6 @@ stress/load, graph edge cases, priority/retention edge cases, dedup edge cases.
 
 from __future__ import annotations
 
-import tempfile
 import time
 import uuid
 from pathlib import Path
