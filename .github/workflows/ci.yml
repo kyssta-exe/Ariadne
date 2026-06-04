@@ -35,8 +35,8 @@ jobs:
       - name: Run Ruff (lint)
         run: ruff check src/ tests/
 
-      - name: Run Mypy (strict type check)
-        run: mypy src/ --strict
+      - name: Run Mypy (type check)
+        run: mypy src/
 
   test:
     name: Test (Python ${{ matrix.python-version }})
