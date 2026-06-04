@@ -15,8 +15,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "devDependencies": {
+  "dependencies": {
     "vitepress": "^1.6.4"
   },
+  "devDependencies": {},
   "type": "module"
 }
