@@ -31,6 +31,8 @@ Real benchmarks from real hardware. No synthetic reports, no GPU acceleration, n
 
 ::: warning
 These are **full-method** benchmarks — they measure the entire search pipeline including SQLite reads, result construction, and RRF fusion. Not just the raw FAISS `index.search()` call.
+
+FTS5 and hybrid latency depends on **query selectivity**. Selective queries (matching ~10% of the database) run in 1-3ms. Broad queries (matching most of the database) are slower because FTS5 must rank more results. The numbers below reflect typical selective queries.
 :::
 
 **Scaling with dataset size (vector search, p50):**
