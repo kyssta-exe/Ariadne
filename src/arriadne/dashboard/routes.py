@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from fastapi import APIRouter
-from fastapi.responses import FileResponse, HTMLResponse
-from starlette.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 
 router = APIRouter()
 
