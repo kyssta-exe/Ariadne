@@ -1,4 +1,8 @@
-# Benchmarks
+---
+title: "Benchmarks — Ariadne"
+description: "Real performance benchmarks on 4-core 8GB VPS: 0.78ms vector search, 2.15ms hybrid, 0.12ms dedup."
+---
+
 
 Real benchmarks from real hardware. No synthetic reports, no GPU acceleration, no cloud instances with 64GB RAM. These numbers are from the same kind of VPS you'd run in production.
 

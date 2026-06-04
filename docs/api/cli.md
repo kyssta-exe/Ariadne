@@ -1,4 +1,8 @@
-# CLI Reference
+---
+title: "CLI Reference — Ariadne"
+description: "Ariadne CLI: init, add, search, stats, migrate. Command-line interface for managing your memory database."
+---
+
 
 Ariadne provides a command-line interface for common operations without writing Python code.
 

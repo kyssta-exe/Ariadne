@@ -1,4 +1,8 @@
-# Configuration
+---
+title: "Configuration — Ariadne"
+description: "Configure Ariadne: embedding dimensions, FAISS index type, dedup thresholds, retention settings, priority weights."
+---
+
 
 ## AriadneConfig
 

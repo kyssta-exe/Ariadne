@@ -1,4 +1,8 @@
-# Storage Engine (AriadneDB)
+---
+title: "Storage Engine API — Ariadne"
+description: "AriadneDB low-level API: direct access to SQLite storage, FAISS vector search, FTS5 keywords, and knowledge graph."
+---
+
 
 Low-level storage API providing direct access to SQLite, FAISS, and graph operations. Used internally by `AriadneMemory` — use this API for advanced operations.
 

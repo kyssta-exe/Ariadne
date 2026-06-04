@@ -1,4 +1,8 @@
-# Memory Types
+---
+title: "Memory Types — Ariadne"
+description: "Semantic, episodic, and procedural memory types in Ariadne. When to use each, how they affect search and retention."
+---
+
 
 Ariadne supports three memory types that model different categories of human-like memory. Each type is stored with a `memory_type` tag and can be filtered independently during search.
 

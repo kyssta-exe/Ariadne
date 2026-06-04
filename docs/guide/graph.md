@@ -1,4 +1,8 @@
-# Knowledge Graph
+---
+title: "Knowledge Graph — Ariadne"
+description: "Build and traverse a knowledge graph with typed entities, relationships, and multi-hop BFS traversal via SQLite recursive CTEs."
+---
+
 
 Ariadne's knowledge graph connects memories through **entities** and **typed relationships**, enabling multi-hop traversal that finds connections vector search alone might miss.
 

@@ -1,4 +1,8 @@
-# AriadneMemory
+---
+title: "API Reference — Ariadne"
+description: "AriadneMemory API: remember, recall, forget, update, graph, add_edge, consolidate, stats. Complete method reference."
+---
+
 
 The high-level API implementing the Hermes agent memory protocol. Wraps `AriadneDB` and `Deduplicator` into a clean, unified interface.
 

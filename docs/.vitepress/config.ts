@@ -3,8 +3,36 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   base: '/',
   title: 'Ariadne',
-  description: 'Next-generation AI memory system — thread through the labyrinth of memories.',
-  head: [],
+  description: 'Next-generation AI memory system — sub-millisecond hybrid search, cognitive retention, and knowledge graph traversal. Zero infrastructure.',
+
+  head: [
+    // Open Graph
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: 'Ariadne' }],
+    ['meta', { property: 'og:title', content: 'Ariadne — Memory for AI Agents' }],
+    ['meta', { property: 'og:description', content: 'Sub-millisecond hybrid search. Cognitive retention. Knowledge graph traversal. Zero infrastructure. One pip install.' }],
+    ['meta', { property: 'og:url', content: 'https://ariadne.mantes.net' }],
+    ['meta', { property: 'og:image', content: 'https://ariadne.mantes.net/og-image.png' }],
+    ['meta', { property: 'og:image:width', content: '1200' }],
+    ['meta', { property: 'og:image:height', content: '630' }],
+
+    // Twitter Card
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:title', content: 'Ariadne — Memory for AI Agents' }],
+    ['meta', { name: 'twitter:description', content: 'Sub-millisecond hybrid search. Cognitive retention. Knowledge graph. Zero infrastructure.' }],
+    ['meta', { name: 'twitter:image', content: 'https://ariadne.mantes.net/og-image.png' }],
+
+    // Canonical
+    ['link', { rel: 'canonical', href: 'https://ariadne.mantes.net' }],
+
+    // Google Search Console (replace with your actual code)
+    // ['meta', { name: 'google-site-verification', content: 'YOUR_CODE_HERE' }],
+
+    // Geo meta
+    ['meta', { name: 'robots', content: 'index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1' }],
+    ['meta', { name: 'author', content: 'Mantes' }],
+  ],
+
   themeConfig: {
     logo: '/logo.svg',
     siteTitle: 'Ariadne',
@@ -72,6 +100,10 @@ export default defineConfig({
       pattern: 'https://github.com/kyssta-exe/Ariadne/edit/main/docs/:path',
       text: 'Edit this page on GitHub',
     },
+  },
+
+  sitemap: {
+    hostname: 'https://ariadne.mantes.net',
   },
 
   markdown: {

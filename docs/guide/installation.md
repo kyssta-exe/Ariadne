@@ -1,4 +1,8 @@
-# Installation
+---
+title: "Installation — Ariadne"
+description: "Install Ariadne with pip install ariadne. No system packages, no Docker, no external services. Python 3.10+ required."
+---
+
 
 ## From PyPI
 

@@ -1,4 +1,8 @@
-# Deduplication
+---
+title: "Deduplication — Ariadne"
+description: "MinHash LSH near-duplicate detection at 0.12ms. Automatic deduplication on memory insert."
+---
+
 
 Ariadne uses **MinHash LSH** (Locality-Sensitive Hashing) for near-duplicate detection and a **negation-based pattern matcher** for contradiction detection. Both run automatically during `remember()`.
 

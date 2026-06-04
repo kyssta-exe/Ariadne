@@ -1,4 +1,8 @@
-# Architecture
+---
+title: "Architecture — Ariadne"
+description: "Ariadne internals: SQLite + FAISS storage engine, search pipeline, knowledge graph, and memory lifecycle."
+---
+
 
 Ariadne is a single-process, zero-daemon memory system built on **SQLite** (with WAL mode), **FAISS** (vector index), and **MinHash LSH** (deduplication). No external servers, no cloud dependencies.
 

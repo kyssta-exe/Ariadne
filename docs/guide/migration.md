@@ -1,4 +1,8 @@
-# Migration
+---
+title: "Migration — Ariadne"
+description: "Migrate from Mnemosyne to Ariadne. Export, import, and verify your memories, graph edges, and metadata."
+---
+
 
 Ariadne supports importing memories from **Mnemosyne** (flashcard tool) and **custom JSON files**. You can migrate via the CLI or programmatically.
 

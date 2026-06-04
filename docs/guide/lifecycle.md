@@ -1,4 +1,8 @@
-# Memory Lifecycle
+---
+title: "Memory Lifecycle — Ariadne"
+description: "Ebbinghaus forgetting curve, priority-based retention, automatic consolidation, and eviction in Ariadne."
+---
+
 
 Ariadne models how human memory works: memories strengthen with use and fade without it. The lifecycle system manages retention, priority scoring, eviction, and consolidation.
 

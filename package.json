@@ -16,8 +16,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "playwright": "^1.60.0",
     "vitepress": "^1.6.4"
   },
-  "devDependencies": {},
   "type": "module"
 }

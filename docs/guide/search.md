@@ -1,4 +1,8 @@
-# Search & Retrieval
+---
+title: "Search & Retrieval — Ariadne"
+description: "Hybrid search with FAISS vector similarity, FTS5 keyword matching, and Reciprocal Rank Fusion. 92% recall@10."
+---
+
 
 Ariadne's hybrid search combines **FAISS vector similarity**, **SQLite FTS5 keyword search**, and **Reciprocal Rank Fusion** to deliver high-recall retrieval with sub-millisecond latency.
 

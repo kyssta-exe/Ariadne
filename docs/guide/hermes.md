@@ -1,4 +1,8 @@
-# Setup with Hermes
+---
+title: "Setup with Hermes Agent — Ariadne"
+description: "Replace Mnemosyne with Ariadne in Hermes Agent. One command setup, 196x faster search, same tool names."
+---
+
 
 Ariadne replaces the default Mnemosyne memory provider in [Hermes Agent](https://hermes-agent.nousresearch.com/). 196× faster search, hybrid retrieval, knowledge graph, deduplication. Same tool names, same interface.
 

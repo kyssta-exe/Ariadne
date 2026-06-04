@@ -1,4 +1,8 @@
-# Dedup & Contradiction Detection
+---
+title: "Dedup & Contradiction API — Ariadne"
+description: "Deduplicator and ContradictionDetector API: MinHash LSH dedup, negation pattern matching, fact extraction."
+---
+
 
 MinHash LSH deduplication and negation-based contradiction detection APIs.
 

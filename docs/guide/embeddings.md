@@ -1,4 +1,8 @@
-# Embeddings
+---
+title: "Embeddings — Ariadne"
+description: "Use any embedding model with Ariadne. Recommended: sentence-transformers all-MiniLM-L6-v2 for 384-dim vectors."
+---
+
 
 Ariadne is model-agnostic — any embedding model that produces a fixed-dimensional vector works. Here's how to choose, configure, and use embeddings.
 

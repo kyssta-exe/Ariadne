@@ -1,4 +1,8 @@
-# Introduction
+---
+title: "Introduction — Ariadne"
+description: "Ariadne is a local memory system for AI agents. Sub-millisecond hybrid search, cognitive retention, and knowledge graph traversal. Zero infrastructure."
+---
+
 
 **Ariadne** is a memory system for AI agents. Named after the Greek goddess who gave Theseus the thread to navigate the Labyrinth, Ariadne gives your AI agent the thread to navigate its own memories.
 

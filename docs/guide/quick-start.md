@@ -1,4 +1,8 @@
-# Quick Start
+---
+title: "Quick Start — Ariadne"
+description: "Get started with Ariadne in 5 minutes. Store memories, search with hybrid retrieval, traverse the knowledge graph."
+---
+
 
 Get Ariadne running in under 60 seconds.
 
