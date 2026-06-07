@@ -56,3 +56,30 @@ jobs:
           name: dist
           path: dist/
           retention-days: 30
+
+  publish-alias:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build alias package (arriadne-memory)
+        run: |
+          cp pyproject.toml pyproject.toml.bak
+          sed -i 's/^name = "arriadne"/name = "arriadne-memory"/' pyproject.toml
+          python -m build
+          mv pyproject.toml.bak pyproject.toml
+
+      - name: Publish alias to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
