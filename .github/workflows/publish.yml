@@ -73,6 +73,7 @@ jobs:
 
       - name: Build alias package (arriadne-memory)
         run: |
+          python -m pip install build
           cp pyproject.toml pyproject.toml.bak
           sed -i 's/^name = "arriadne"/name = "arriadne-memory"/' pyproject.toml
           python -m build
