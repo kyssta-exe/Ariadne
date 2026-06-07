@@ -58,7 +58,6 @@ jobs:
           retention-days: 30
 
   publish-alias:
-    needs: build-and-publish
     runs-on: ubuntu-latest
     permissions:
       contents: read
