@@ -9,6 +9,7 @@ from arriadne.config import AriadneConfig
 from arriadne.interface import AriadneMemory
 from arriadne.storage import AriadneDB
 from arriadne.dedup import Deduplicator, ContradictionDetector
+from arriadne.embeddings import Embedder, SentenceTransformerEmbedder
 
 __all__ = [
     "AriadneConfig",
@@ -16,4 +17,6 @@ __all__ = [
     "AriadneMemory",
     "Deduplicator",
     "ContradictionDetector",
+    "Embedder",
+    "SentenceTransformerEmbedder",
 ]

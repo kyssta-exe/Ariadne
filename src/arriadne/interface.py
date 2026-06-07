@@ -7,6 +7,7 @@ the Hermes agent memory protocol.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ import numpy as np
 
 from arriadne.config import AriadneConfig
 from arriadne.dedup import ContradictionDetector, Deduplicator
+from arriadne.embeddings import Embedder, resolve_embedder
 from arriadne.storage import AriadneDB
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,7 @@ class AriadneMemory:
         config: AriadneConfig | None = None,
         db_path: str | Path | None = None,
         embedding_dim: int | None = None,
+        embedder: Embedder | str | None = None,
     ) -> None:
         if config is None:
             kwargs: dict[str, Any] = {}
@@ -51,6 +54,21 @@ class AriadneMemory:
             config = AriadneConfig(**kwargs)
 
         self._config = config
+        # Reentrant lock guarding the (not thread-safe) MinHash dedup index.
+        # AriadneDB has its own lock for SQLite + FAISS.
+        self._lock = threading.RLock()
+
+        # Optional embedder: when set, remember()/recall() auto-embed content and
+        # queries so semantic search works without the caller wiring vectors.
+        self._embedder = resolve_embedder(embedder)
+        if self._embedder is not None:
+            emb_dim = getattr(self._embedder, "dim", None)
+            if emb_dim is not None and emb_dim != config.embedding_dim:
+                raise ValueError(
+                    f"embedder output dim {emb_dim} != config.embedding_dim "
+                    f"{config.embedding_dim}; set embedding_dim={emb_dim}"
+                )
+
         self._db = AriadneDB(config)
         self._dedup = Deduplicator(
             threshold=config.dedup_threshold,
@@ -58,7 +76,28 @@ class AriadneMemory:
         )
         self._contradiction_detector = ContradictionDetector()
         self._db.open()
+        self._load_dedup_from_db()
         logger.info("AriadneMemory initialized (db=%s)", config.db_path)
+
+    def _load_dedup_from_db(self) -> None:
+        """Rebuild the in-memory MinHash dedup index from stored memories.
+
+        The Deduplicator lives only in memory. Without this rebuild on open,
+        near-duplicate detection would silently reset to empty on every restart,
+        so only exact (hash-identical) duplicates would be caught across runs.
+        """
+        try:
+            cursor = self._db.conn.execute(
+                "SELECT id, content FROM memories WHERE is_deleted = 0"
+            )
+            count = 0
+            for row in cursor.fetchall():
+                self._dedup.add(row[1], doc_id=str(row[0]))
+                count += 1
+            if count:
+                logger.info("Loaded %d memories into dedup index", count)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to load dedup index from DB: %s", e)
 
     def close(self) -> None:
         """Close the memory system, saving all state."""
@@ -101,43 +140,46 @@ class AriadneMemory:
         }
 
         try:
-            # Check for contradictions with existing memories
-            contradictions = self._check_contradictions(content)
-            if contradictions:
-                result["contradictions"] = contradictions
+            with self._lock:
+                # Check for contradictions with existing memories
+                contradictions = self._check_contradictions(content)
+                if contradictions:
+                    result["contradictions"] = contradictions
 
-            # Check dedup
-            if self._dedup.is_duplicate(content):
-                # Find the existing duplicate
-                duplicates = self._dedup.find_duplicates(content)
-                if duplicates:
-                    result["memory_id"] = None
-                    result["status"] = "duplicate"
-                    result["duplicate_of"] = duplicates[0]["id"]
-                    return result
+                # Check dedup (MinHash near-duplicate detection)
+                if self._dedup.is_duplicate(content):
+                    duplicates = self._dedup.find_duplicates(content)
+                    if duplicates:
+                        result["memory_id"] = None
+                        result["status"] = "duplicate"
+                        result["duplicate_of"] = duplicates[0]["id"]
+                        return result
 
-            # Convert embedding
-            emb_array = None
-            if embedding is not None:
-                emb_array = np.asarray(embedding, dtype=np.float32)
+                # Auto-embed when an embedder is configured and no vector given.
+                if embedding is None and self._embedder is not None:
+                    embedding = self._embedder(content)
 
-            # Add to storage
-            storage_result = self._db.add_memory(
-                content=content,
-                embedding=emb_array,
-                memory_type=memory_type,
-                importance=importance,
-                entities=entities,
-                metadata=metadata,
-            )
+                emb_array = None
+                if embedding is not None:
+                    emb_array = np.asarray(embedding, dtype=np.float32)
 
-            memory_id = storage_result["memory_id"]
-            result["memory_id"] = memory_id
-            result["status"] = storage_result["status"]
+                # Add to storage
+                storage_result = self._db.add_memory(
+                    content=content,
+                    embedding=emb_array,
+                    memory_type=memory_type,
+                    importance=importance,
+                    entities=entities,
+                    metadata=metadata,
+                )
 
-            # Add to dedup index
-            if storage_result["status"] == "created":
-                self._dedup.add(content, doc_id=str(memory_id))
+                memory_id = storage_result["memory_id"]
+                result["memory_id"] = memory_id
+                result["status"] = storage_result["status"]
+
+                # Add to dedup index
+                if storage_result["status"] == "created":
+                    self._dedup.add(content, doc_id=str(memory_id))
 
             logger.info(
                 "Remember: id=%s status=%s type=%s",
@@ -204,6 +246,10 @@ class AriadneMemory:
             List of matching memory dicts.
         """
         try:
+            # Auto-embed the query when an embedder is configured.
+            if embedding is None and self._embedder is not None and query.strip():
+                embedding = self._embedder(query)
+
             emb_array = None
             if embedding is not None:
                 emb_array = np.asarray(embedding, dtype=np.float32)
@@ -228,11 +274,19 @@ class AriadneMemory:
                     continue
                 filtered.append(mem)
 
+            final = filtered[:k]
+
+            # Record access for the memories actually surfaced — one batched
+            # write, instead of the old behaviour where every candidate hit was
+            # updated+committed individually inside search.
+            if final:
+                self._db.touch_memories([m["id"] for m in final])
+
             logger.info(
                 "Recall query=%.50s results=%d filtered=%d",
                 query, len(results), len(filtered),
             )
-            return filtered[:k]
+            return final
 
         except Exception as e:
             logger.error("Error in recall: %s", e)
@@ -249,10 +303,10 @@ class AriadneMemory:
             True if forgotten, False if not found.
         """
         try:
-            # Remove from dedup index
-            self._dedup.remove(str(memory_id))
-
-            result = self._db.delete_memory(memory_id, hard=hard)
+            with self._lock:
+                # Remove from dedup index
+                self._dedup.remove(str(memory_id))
+                result = self._db.delete_memory(memory_id, hard=hard)
             logger.info("Forget: id=%d hard=%s result=%s", memory_id, hard, result)
             return result
         except Exception as e:
@@ -280,22 +334,28 @@ class AriadneMemory:
             True if updated, False if not found.
         """
         try:
-            emb_array = None
-            if embedding is not None:
-                emb_array = np.asarray(embedding, dtype=np.float32)
+            with self._lock:
+                # Auto-embed the new content if an embedder is set and the caller
+                # changed content but didn't supply a fresh vector.
+                if embedding is None and content is not None and self._embedder is not None:
+                    embedding = self._embedder(content)
 
-            result = self._db.update_memory(
-                memory_id,
-                content=content,
-                importance=importance,
-                embedding=emb_array,
-                metadata=metadata,
-            )
+                emb_array = None
+                if embedding is not None:
+                    emb_array = np.asarray(embedding, dtype=np.float32)
 
-            # Update dedup index if content changed
-            if result and content is not None:
-                self._dedup.remove(str(memory_id))
-                self._dedup.add(content, doc_id=str(memory_id))
+                result = self._db.update_memory(
+                    memory_id,
+                    content=content,
+                    importance=importance,
+                    embedding=emb_array,
+                    metadata=metadata,
+                )
+
+                # Update dedup index if content changed
+                if result and content is not None:
+                    self._dedup.remove(str(memory_id))
+                    self._dedup.add(content, doc_id=str(memory_id))
 
             logger.info("Update: id=%d result=%s", memory_id, result)
             return result
@@ -367,7 +427,17 @@ class AriadneMemory:
         Returns:
             Number of consolidation groups created.
         """
-        return self._db.consolidate()
+        with self._lock:
+            count = self._db.consolidate()
+            # Consolidation retires originals and adds merged memories; resync the
+            # in-memory dedup index so it reflects what is actually active.
+            if count:
+                self._dedup = Deduplicator(
+                    threshold=self._config.dedup_threshold,
+                    num_perm=self._config.dedup_num_perm,
+                )
+                self._load_dedup_from_db()
+            return count
 
     def evict(self) -> int:
         """Run priority-based memory eviction.
@@ -376,3 +446,28 @@ class AriadneMemory:
             Number of memories evicted.
         """
         return self._db.evict()
+
+    def purge_deleted(self, older_than_seconds: float = 0.0) -> int:
+        """Permanently remove soft-deleted memories. See AriadneDB.purge_deleted."""
+        return self._db.purge_deleted(older_than_seconds)
+
+    def prune_access_log(self, keep_per_memory: int | None = None) -> int:
+        """Trim the access log to bound its growth. See AriadneDB.prune_access_log."""
+        return self._db.prune_access_log(keep_per_memory)
+
+    def maintenance(self) -> dict[str, int]:
+        """Run a full housekeeping cycle: consolidate, evict, prune, purge.
+
+        Returns a summary dict of how much each step changed.
+        """
+        with self._lock:
+            consolidated = self.consolidate()
+            evicted = self._db.evict()
+            pruned = self._db.prune_access_log()
+            purged = self._db.purge_deleted()
+        return {
+            "consolidated": consolidated,
+            "evicted": evicted,
+            "access_log_pruned": pruned,
+            "purged": purged,
+        }

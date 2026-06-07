@@ -1,10 +1,10 @@
 ---
 title: "Search & Retrieval — Ariadne"
-description: "Hybrid search with FAISS vector similarity, FTS5 keyword matching, and Reciprocal Rank Fusion. 92% recall@10."
+description: "Hybrid search with FAISS vector similarity, FTS5 keyword matching, and Reciprocal Rank Fusion."
 ---
 
 
-Ariadne's hybrid search combines **FAISS vector similarity**, **SQLite FTS5 keyword search**, and **Reciprocal Rank Fusion** to deliver high-recall retrieval with sub-millisecond latency.
+Ariadne's hybrid search combines **FAISS vector similarity**, **SQLite FTS5 keyword search**, and **Reciprocal Rank Fusion** for high-recall retrieval, entirely in-process.
 
 ## Search Pipeline
 
@@ -18,7 +18,11 @@ Query Text
     └────► FAISS Vector Search ────────┘
 ```
 
-When an embedding is provided, both search paths run in parallel and results are fused. Without an embedding, only FTS5 keyword search is used.
+When a query vector is available, both search paths run and the rankings are
+fused; otherwise only FTS5 keyword search is used. If you configured an
+`embedder` on `AriadneMemory`, `recall()` embeds the query for you, so you get
+hybrid search without passing a vector. `recall()` also records an access for the
+memories it returns (see [Lifecycle](./lifecycle)).
 
 ## Vector Search (FAISS)
 
@@ -41,9 +45,12 @@ results = mem.recall(
 )
 ```
 
-The FAISS index automatically selects the optimal algorithm:
-- **FlatIP** for fewer than 1,000 vectors (exact search)
-- **IVFFlat** for 1,000+ vectors (approximate, much faster)
+The FAISS index automatically selects the algorithm by vector count:
+- **FlatIP** (exact) until the dataset reaches `ivf_threshold` (default 50,000)
+- **IVFFlat** (approximate, faster at scale) beyond that
+
+See [Architecture](./architecture#faiss-index-strategy) for the staged-upgrade
+details.
 
 ## Full-Text Search (FTS5)
 
@@ -54,13 +61,18 @@ SQLite FTS5 provides BM25-ranked keyword search with stemming (Porter) and Unico
 results = mem.recall("database migration", k=10)
 ```
 
-FTS5 queries are automatically escaped and expanded into OR terms:
+FTS5 queries are automatically escaped and quoted. `fts_search` runs them in two
+phases: **AND first** (all terms must match — precise), falling back to **OR**
+(any term — high recall) only when AND returns nothing. This avoids a single
+shared stopword dragging in unrelated memories.
 
 ```python
 from arriadne.storage import _fts_escape
 
-_fts_escape("deploy to production server")
-# Returns: '"deploy" OR "to" OR "production" OR "server"'
+_fts_escape("deploy production server", op="AND")
+# '"deploy" AND "production" AND "server"'
+_fts_escape("deploy production server", op="OR")
+# '"deploy" OR "production" OR "server"'
 ```
 
 ## Hybrid Search with RRF
@@ -165,14 +177,13 @@ results = mem.recall(
 )
 ```
 
-## Performance Characteristics
+## Performance
 
-| Metric | Value |
-|--------|-------|
-| Vector search latency | ~0.78ms (10K memories) |
-| FTS5 search latency | ~4.90ms (10K memories) |
-| Hybrid search latency | ~2.15ms (10K memories) |
-| Recall@10 | 92% |
+Latency and recall depend on your hardware, embedding model, dimension, and
+dataset size — so measure on your own data rather than trusting a table. The
+[benchmarks guide](../benchmarks) has a ready-to-run harness. Architecturally,
+vector search is a single BLAS matmul (FlatIP) or an inverted-file lookup (IVF),
+keyword search uses FTS5's BM25 index, and everything runs in-process.
 
 ## Advanced: Direct Access to Search Engines
 

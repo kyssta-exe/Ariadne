@@ -28,7 +28,8 @@ with AriadneDB(AriadneConfig(db_path="memory.db")) as db:
 
 ## `open()`
 
-Open the database connection, create schema, and load FAISS index.
+Open the database connection, create the schema, and build the FAISS index from
+the embeddings stored in the database.
 
 ```python
 db.open()
@@ -40,7 +41,9 @@ Called automatically on first use if not called explicitly.
 
 ## `close()`
 
-Close the database connection and save the FAISS index to disk.
+Close the database connection (with a final WAL checkpoint). There is no
+separate FAISS file to save — embeddings live in the `.db` and the index is
+rebuilt on the next `open()`.
 
 ```python
 db.close()
@@ -82,19 +85,22 @@ result = db.add_memory(
 
 ### Behavior
 
-1. Computes SHA-256 content hash for exact dedup
-2. Checks for existing memory with same hash
-3. L2-normalizes embedding if provided
-4. Inserts into `memories` table
-5. Adds to FAISS index
-6. Auto-upgrades FAISS from FlatIP to IVFFlat if threshold exceeded
-7. Associates entities via `memory_entities` table
+1. Clamps `importance` into `[0, 1]`
+2. Computes SHA-256 content hash for exact dedup
+3. Checks for an existing (non-deleted) memory with the same hash
+4. L2-normalizes the embedding if provided
+5. Inserts into the `memories` table
+6. Adds the vector to the FAISS index keyed by the new memory id (`IndexIDMap2`)
+7. Upgrades FlatIP → IVFFlat if the count crossed the threshold
+8. Associates entities via `memory_entities`
 
 ---
 
 ## `get_memory()`
 
-Retrieve a memory by ID. Automatically updates access tracking.
+Retrieve a memory by ID. This is a **pure read** — it does not change
+`access_count`, `accessed_at`, or `retention_strength`. Record an access
+explicitly with `touch_memory()` / `touch_memories()`.
 
 ```python
 memory = db.get_memory(memory_id=42)
@@ -119,9 +125,21 @@ memory = db.get_memory(memory_id=42)
 }
 ```
 
-::: warning
-Each call to `get_memory()` increments `access_count` and updates `accessed_at`, affecting retention scoring.
-:::
+---
+
+## `touch_memory()` / `touch_memories()`
+
+Record an access for one or many memories in a single transaction. Increments
+`access_count`, refreshes `accessed_at`, grows `retention_strength` by
+`retention_growth_factor` (capped), and logs to `access_log`.
+
+```python
+db.touch_memory(42)
+db.touch_memories([1, 2, 3])
+```
+
+`AriadneMemory.recall()` calls `touch_memories()` on the results it returns, so
+normal recall already records access — you only need these for manual control.
 
 ---
 
@@ -314,7 +332,7 @@ R = db.compute_retention_strength(memory)
 | Factor | Formula |
 |--------|---------|
 | `t` | `now - memory["accessed_at"]` |
-| `S` | `retention_half_life × importance` |
+| `S` | `retention_half_life × importance × retention_strength` |
 | `R` | `exp(-t / S)` |
 
 ### `compute_priority_score()`
@@ -359,7 +377,7 @@ evicted = db.evict()
 
 ## `consolidate()`
 
-Group similar memories using Jaccard similarity and create consolidation records.
+Group similar memories and merge each group into a single memory.
 
 ```python
 groups = db.consolidate()
@@ -368,14 +386,41 @@ groups = db.consolidate()
 ### Behavior
 
 1. Load up to 5,000 active memories
-2. Tokenize content into word sets
-3. Compute Jaccard similarity between all pairs
-4. Group memories with similarity ≥ `consolidation_threshold`
-5. Create consolidation records (content joined by ` | `)
+2. Tokenize content into word sets and group by Jaccard similarity ≥ `consolidation_threshold` (min group `consolidation_min_group`)
+3. For each group, create a merged memory: content joined by ` | `, importance = group max, mean-pooled embedding
+4. Soft-delete the originals and link them to the merged memory (`memory_links`, `link_type='consolidated'`)
+5. Record the group in the `consolidations` table
 
 ### Returns
 
 `int` — Number of consolidation groups created.
+
+---
+
+## `prune_access_log()`
+
+Keep only the most recent `keep_per_memory` access-log rows per memory (default
+`max_access_log_per_memory`). Called automatically by `evict()`.
+
+```python
+deleted = db.prune_access_log(keep_per_memory=50)
+```
+
+Returns the number of rows deleted.
+
+---
+
+## `purge_deleted()`
+
+Permanently remove soft-deleted memories (and their entity links, memory links,
+access-log rows, and vectors). `older_than_seconds` keeps recent soft-deletes
+recoverable; pass `0` to purge everything currently marked deleted.
+
+```python
+purged = db.purge_deleted(older_than_seconds=86400)
+```
+
+Returns the number of memories purged.
 
 ---
 

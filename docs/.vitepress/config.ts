@@ -3,14 +3,14 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   base: '/',
   title: 'Ariadne',
-  description: 'Next-generation AI memory system — sub-millisecond hybrid search, cognitive retention, and knowledge graph traversal. Zero infrastructure.',
+  description: 'Local-first AI memory system — hybrid search, cognitive retention, and knowledge graph traversal. Zero infrastructure.',
 
   head: [
     // Open Graph
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'Ariadne' }],
     ['meta', { property: 'og:title', content: 'Ariadne — Memory for AI Agents' }],
-    ['meta', { property: 'og:description', content: 'Sub-millisecond hybrid search. Cognitive retention. Knowledge graph traversal. Zero infrastructure. One pip install.' }],
+    ['meta', { property: 'og:description', content: 'Local-first hybrid search. Cognitive retention. Knowledge graph traversal. Zero infrastructure. One pip install.' }],
     ['meta', { property: 'og:url', content: 'https://ariadne.mantes.net' }],
     ['meta', { property: 'og:image', content: 'https://ariadne.mantes.net/og-image.png' }],
     ['meta', { property: 'og:image:width', content: '1200' }],
@@ -19,7 +19,7 @@ export default defineConfig({
     // Twitter Card
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
     ['meta', { name: 'twitter:title', content: 'Ariadne — Memory for AI Agents' }],
-    ['meta', { name: 'twitter:description', content: 'Sub-millisecond hybrid search. Cognitive retention. Knowledge graph. Zero infrastructure.' }],
+    ['meta', { name: 'twitter:description', content: 'Local-first hybrid search. Cognitive retention. Knowledge graph. Zero infrastructure.' }],
     ['meta', { name: 'twitter:image', content: 'https://ariadne.mantes.net/og-image.png' }],
 
     // Canonical

@@ -113,11 +113,18 @@ class TestMemoryCRUD:
 
     def test_get_memory(self, db: AriadneDB) -> None:
         result = db.add_memory("Test content", importance=0.8)
+        # get_memory is a pure read now — it does NOT bump access_count.
         memory = db.get_memory(result["memory_id"])
         assert memory is not None
         assert memory["content"] == "Test content"
         assert memory["importance"] == 0.8
-        assert memory["access_count"] >= 1  # Incremented on get
+        assert memory["access_count"] == 0  # pure read, no mutation
+
+        # Access is recorded explicitly via touch.
+        db.touch_memory(result["memory_id"])
+        memory = db.get_memory(result["memory_id"])
+        assert memory is not None
+        assert memory["access_count"] == 1
 
     def test_get_nonexistent(self, db: AriadneDB) -> None:
         assert db.get_memory(99999) is None
@@ -397,9 +404,10 @@ class TestFAISSIndex:
             emb = np.random.randn(8).astype(np.float32)
             db.add_memory(f"Vector {i}", embedding=emb)
 
-        # After adding enough vectors, should be IVFFlat
+        # After adding enough vectors, should be IVFFlat (wrapped in IndexIDMap2)
         import faiss
-        assert isinstance(db._faiss_index, faiss.IndexIVFFlat)
+        assert isinstance(db._faiss_index, faiss.IndexIDMap2)
+        assert isinstance(faiss.downcast_index(db._faiss_index.index), faiss.IndexIVFFlat)
 
     def test_faiss_search_after_upgrade(self, db: AriadneDB) -> None:
         """Test search works after index upgrade."""

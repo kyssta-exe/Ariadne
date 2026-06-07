@@ -102,12 +102,12 @@ ariadne stats
 
 ## What Just Happened
 
-1. **`AriadneMemory()`** opened (or created) a SQLite database in WAL mode and loaded/created a FAISS index
-2. **`remember()`** ran SHA-256 exact dedup, MinHash LSH near-duplicate check, negation-based contradiction detection, stored the memory with an L2-normalized embedding in FAISS, and associated entities in the knowledge graph
-3. **`recall()`** ran hybrid search: FTS5 keyword → FAISS vector → Reciprocal Rank Fusion (merges both ranked lists into one)
+1. **`AriadneMemory()`** opened (or created) a SQLite database in WAL mode and built the FAISS index from the stored embeddings
+2. **`remember()`** ran SHA-256 exact dedup, MinHash LSH near-duplicate check, negation-based contradiction detection, stored the memory with an L2-normalized embedding (in SQLite and FAISS), and associated entities in the knowledge graph
+3. **`recall()`** ran hybrid search: FTS5 keyword → FAISS vector → Reciprocal Rank Fusion (merges both ranked lists into one), and recorded an access for the returned memories
 4. **`add_edge()`** upserted entities and created a typed, weighted relationship between them
 5. **`graph()`** ran BFS traversal via SQLite recursive CTE — following edges bidirectionally up to 3 hops
-6. **`close()`** saved the FAISS index to `.faiss` file and closed the SQLite connection
+6. **`close()`** ran a final WAL checkpoint and closed the SQLite connection (no separate index file to save)
 
 ## Next Steps
 

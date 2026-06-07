@@ -11,10 +11,12 @@ import logging
 import math
 import re
 import sqlite3
+import threading
 import time
-from functools import lru_cache
+from collections.abc import Callable
+from functools import lru_cache, wraps
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar, cast
 
 import faiss
 import numpy as np
@@ -22,6 +24,24 @@ import numpy as np
 from arriadne.config import AriadneConfig
 
 logger = logging.getLogger(__name__)
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _synchronized(method: _F) -> _F:
+    """Serialize a method on the instance's reentrant ``_lock``.
+
+    Guards every public SQLite + FAISS entry point so a single AriadneDB can be
+    shared across threads. The lock is reentrant, so synchronized methods may
+    freely call one another (e.g. search -> get_memory).
+    """
+
+    @wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return cast("_F", wrapper)
 
 
 class _SupportsNumpy(Protocol):
@@ -41,15 +61,21 @@ def _hash_content(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _clamp01(value: float) -> float:
+    """Clamp a value into the documented [0.0, 1.0] range."""
+    return max(0.0, min(1.0, float(value)))
+
+
 # Pre-compiled regex for FTS5 query parsing (Optimization: avoids re-compilation on every call)
 _FTS_WORD_RE = re.compile(r"\w+")
 
 
-def _fts_escape(query: str) -> str:
-    """Escape FTS5 special characters and expand into OR terms.
+def _fts_escape(query: str, op: str = "OR") -> str:
+    """Escape FTS5 special characters and join terms with ``op`` (OR/AND).
 
-    Each word is quoted individually to handle special characters,
-    then joined with OR for broad matching.
+    Each word is quoted individually to handle special characters. ``fts_search``
+    uses AND first (precise) and falls back to OR (recall) when AND finds
+    nothing, so broad and narrow queries both behave sensibly.
 
     Optimization: Uses pre-compiled _FTS_WORD_RE pattern instead of
     re.findall(r"\\w+", query) to avoid re-compilation on every search call.
@@ -57,11 +83,9 @@ def _fts_escape(query: str) -> str:
     words = _FTS_WORD_RE.findall(query)
     if not words:
         return '""'
-    escaped = []
-    for word in words:
-        safe = word.replace('"', '""')
-        escaped.append(f'"{safe}"')
-    return " OR ".join(escaped)
+    escaped = [f'"{word.replace(chr(34), chr(34) * 2)}"' for word in words]
+    joiner = " AND " if op.upper() == "AND" else " OR "
+    return joiner.join(escaped)
 
 
 def _jaccard_similarity(a: set[str], b: set[str]) -> float:
@@ -92,11 +116,14 @@ class AriadneDB:
     def __init__(self, config: AriadneConfig | None = None) -> None:
         self._config = config or AriadneConfig()
         self._conn: sqlite3.Connection | None = None
+        # FAISS index is an IndexIDMap2 keyed on each memory's own primary key,
+        # so vector positions can never drift out of sync with the database.
         self._faiss_index: faiss.Index | None = None
-        self._id_map: dict[int, int] = {}  # internal_id -> faiss_id
-        self._reverse_id_map: dict[int, int] = {}  # faiss_id -> internal_id
-        self._next_faiss_id: int = 0
         self._initialized = False
+        # Reentrant lock guarding all SQLite + FAISS state. The connection is
+        # opened with check_same_thread=False so a single AriadneDB can be shared
+        # across threads (the common case for an agent serving concurrent turns).
+        self._lock = threading.RLock()
         # WAL checkpoint tracking (Optimization: prevents WAL file from growing unbounded)
         self._write_count: int = 0
         self._wal_checkpoint_interval: int = 1000  # Checkpoint every N writes
@@ -120,7 +147,7 @@ class AriadneDB:
             return
         db_path = str(self._config.db_path)
         logger.info("Opening database at %s", db_path)
-        self._conn = sqlite3.connect(db_path)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(f"PRAGMA wal_autocheckpoint={self._config.wal_autocheckpoint}")
@@ -131,9 +158,13 @@ class AriadneDB:
         self._initialized = True
 
     def close(self) -> None:
-        """Close database connection and save FAISS index."""
-        if self._faiss_index is not None:
-            self._save_faiss_index()
+        """Close the database connection.
+
+        The FAISS index is not serialized separately: every embedding lives in
+        the ``memories`` table as a normalized BLOB and the index is rebuilt
+        from it on the next open. This keeps vectors and metadata in a single
+        source of truth that can never diverge.
+        """
         # Final WAL checkpoint before close (Optimization: flush pending WAL writes)
         if self._conn is not None:
             try:
@@ -329,114 +360,102 @@ class AriadneDB:
         logger.debug("Schema created/verified")
 
     def _load_faiss_index(self) -> None:
-        """Load FAISS index from disk or create a new one."""
-        index_path = self._get_faiss_path()
-        self._id_map = {}
-        self._reverse_id_map = {}
-        self._next_faiss_id = 0
+        """Build the FAISS index from the embeddings stored in the database.
 
-        if index_path.exists():
-            try:
-                self._faiss_index = faiss.read_index(str(index_path))
-                # Rebuild id maps from database
-                self._rebuild_id_maps()
-                logger.info(
-                    "Loaded FAISS index with %d vectors from %s",
-                    self._faiss_index.ntotal,
-                    index_path,
-                )
-            except Exception as e:
-                logger.warning("Failed to load FAISS index, creating new: %s", e)
-                self._faiss_index = None
+        The ``memories`` table is the single source of truth for vectors. Because
+        we rebuild on open and key every vector on its memory id (IndexIDMap2),
+        the index can never drift out of sync with the database — the failure
+        mode of the old positional id-map, which silently returned the wrong
+        memory after a delete + reopen.
+        """
+        self._faiss_index = self._build_faiss_from_db()
 
-        if self._faiss_index is None:
-            self._faiss_index = self._create_faiss_index(0)
-            logger.info("Created new FAISS index")
+    def _ivf_plan(self, n: int) -> int:
+        """Return the IVF ``nlist`` to use for ``n`` vectors, or 0 to stay flat.
 
-    def _get_faiss_path(self) -> Path:
-        """Return path for FAISS index file."""
-        return Path(str(self._config.db_path) + ".faiss")
+        An IVF index can only be added to *after* it is trained, and training
+        needs enough samples. So for every mode we keep a plain FlatIP index
+        until there is enough data, then switch to IVF (via a full rebuild that
+        trains on all current vectors). This is why ``faiss_type='ivf_flat'`` no
+        longer crashes on the first insert — it simply stages through FlatIP.
+        """
+        if self._config.faiss_type == "flat_ip":
+            return 0
+        if self._config.faiss_type == "auto":
+            threshold = self._config.ivf_threshold
+        else:  # ivf_flat — switch as soon as we can train a usable index
+            threshold = self._config.ivf_min_points
+        if n < threshold:
+            return 0
+        # nlist scales with sqrt(n) and is always <= n, so training is valid.
+        return min(self._config.ivf_nlist, max(1, int(n ** 0.5)))
 
-    def _rebuild_id_maps(self) -> None:
-        """Rebuild FAISS ID mappings from database embeddings."""
-        assert self._conn is not None
-        assert self._faiss_index is not None
-        self._id_map = {}
-        self._reverse_id_map = {}
-        self._next_faiss_id = 0
-
-        cursor = self._conn.execute(
-            "SELECT id FROM memories WHERE embedding IS NOT NULL AND is_deleted = 0"
-        )
-        rows = cursor.fetchall()
-        for row in rows:
-            internal_id = row[0]
-            faiss_id = self._next_faiss_id
-            self._id_map[internal_id] = faiss_id
-            self._reverse_id_map[faiss_id] = internal_id
-            self._next_faiss_id += 1
-
-    def _create_faiss_index(self, initial_size: int) -> faiss.Index:
-        """Create appropriate FAISS index based on config and size."""
+    def _create_base_index(self, initial_size: int) -> faiss.Index:
+        """Create the underlying (un-wrapped) FAISS index based on config and size."""
         dim = self._config.embedding_dim
-        match self._config.faiss_type:
-            case "flat_ip":
-                return faiss.IndexFlatIP(dim)
-            case "ivf_flat":
-                quantizer = faiss.IndexFlatIP(dim)
-                nlist = min(self._config.ivf_nlist, max(1, initial_size))
-                index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
-                return index
-            case "auto":
-                if initial_size >= self._config.ivf_threshold:
-                    quantizer = faiss.IndexFlatIP(dim)
-                    nlist = min(
-                        self._config.ivf_nlist,
-                        max(1, int(initial_size ** 0.5)),  # sqrt(n) for optimal FAISS clustering
-                    )
-                    index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
-                    return index
-                else:
-                    return faiss.IndexFlatIP(dim)
-            case _:
-                raise ValueError(f"Unknown faiss_type: {self._config.faiss_type!r}")
+        if self._config.faiss_type not in ("flat_ip", "ivf_flat", "auto"):
+            raise ValueError(f"Unknown faiss_type: {self._config.faiss_type!r}")
+        nlist = self._ivf_plan(initial_size)
+        if nlist <= 0:
+            return faiss.IndexFlatIP(dim)
+        quantizer = faiss.IndexFlatIP(dim)
+        return faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+
+    def _build_faiss_from_db(self) -> faiss.Index:
+        """Construct a fresh IndexIDMap2 from all active embeddings in the DB.
+
+        Vectors are keyed by the memory's own primary key. Soft-deleted memories
+        are excluded, so dead vectors do not accumulate across restarts.
+        """
+        assert self._conn is not None
+        dim = self._config.embedding_dim
+        cursor = self._conn.execute(
+            "SELECT id, embedding FROM memories "
+            "WHERE embedding IS NOT NULL AND is_deleted = 0 ORDER BY id"
+        )
+        ids: list[int] = []
+        vectors: list[np.ndarray] = []
+        for row in cursor.fetchall():
+            blob = row[1]
+            if blob is None:
+                continue
+            vec = np.frombuffer(blob, dtype=np.float32)
+            if vec.shape[0] != dim:
+                logger.warning(
+                    "Skipping memory %d: stored embedding dim %d != configured %d",
+                    row[0], vec.shape[0], dim,
+                )
+                continue
+            ids.append(int(row[0]))
+            vectors.append(vec)
+
+        base = self._create_base_index(len(ids))
+        if ids:
+            matrix = np.ascontiguousarray(np.vstack(vectors), dtype=np.float32)
+            if not base.is_trained:
+                base.train(matrix)
+        index = faiss.IndexIDMap2(base)
+        if ids:
+            index.add_with_ids(matrix, np.asarray(ids, dtype=np.int64))
+        logger.info("Built FAISS index from DB (%d vectors)", len(ids))
+        return index
 
     def _maybe_upgrade_faiss_index(self) -> None:
-        """Upgrade from FlatIP to IVFFlat if vector count exceeds threshold."""
+        """Upgrade from FlatIP to IVFFlat once enough vectors exist to train it."""
         assert self._faiss_index is not None
-        ntotal = self._faiss_index.ntotal
-        if self._config.faiss_type == "auto":
-            is_flat = isinstance(self._faiss_index, faiss.IndexFlatIP)
-            if is_flat and ntotal >= self._config.ivf_threshold:
-                logger.info(
-                    "Upgrading FAISS index from FlatIP to IVFFlat (%d vectors)",
-                    ntotal,
-                )
-                old_vectors = faiss.rev_swig_ptr(
-                    self._faiss_index.get_xb(), ntotal * self._config.embedding_dim
-                )
-                old_vectors = old_vectors.reshape(ntotal, self._config.embedding_dim).copy()
-
-                new_index = self._create_faiss_index(ntotal)
-                if isinstance(new_index, faiss.IndexIVFFlat):
-                    new_index.train(old_vectors)
-                new_index.add(old_vectors)
-                self._faiss_index = new_index
-
-    def _save_faiss_index(self) -> None:
-        """Save FAISS index to disk."""
-        if self._faiss_index is None or self._faiss_index.ntotal == 0:
+        if self._config.faiss_type == "flat_ip":
             return
-        try:
-            index_path = self._get_faiss_path()
-            # IVFFlat requires write_index directly
-            if isinstance(self._faiss_index, faiss.IndexIVFFlat):
-                faiss.write_index(self._faiss_index, str(index_path))
-            else:
-                faiss.write_index(self._faiss_index, str(index_path))
-            logger.debug("Saved FAISS index with %d vectors", self._faiss_index.ntotal)
-        except Exception as e:
-            logger.error("Failed to save FAISS index: %s", e)
+        if self._ivf_plan(self._faiss_index.ntotal) <= 0:
+            return
+        base = self._faiss_index
+        if isinstance(base, faiss.IndexIDMap2):
+            base = faiss.downcast_index(base.index)
+        if isinstance(base, faiss.IndexFlat):
+            logger.info(
+                "Upgrading FAISS index from FlatIP to IVFFlat (%d vectors)",
+                self._faiss_index.ntotal,
+            )
+            self._faiss_index = self._build_faiss_from_db()
 
     def _normalize_embedding(self, embedding: np.ndarray) -> np.ndarray:
         """L2-normalize embedding vector for cosine similarity."""
@@ -445,6 +464,7 @@ class AriadneDB:
             return embedding
         return embedding / norm
 
+    @_synchronized
     def add_memory(
         self,
         content: str,
@@ -469,6 +489,7 @@ class AriadneDB:
         """
         assert self._conn is not None
         try:
+            importance = _clamp01(importance)
             content_hash = _hash_content(content)
 
             # Dedup check
@@ -482,6 +503,7 @@ class AriadneDB:
                 return {"memory_id": existing[0], "status": "duplicate"}
 
             now = _now()
+            emb: np.ndarray | None = None
             embedding_blob = None
             if embedding is not None:
                 emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
@@ -498,19 +520,14 @@ class AriadneDB:
                 (content, content_hash, memory_type, importance, embedding_blob,
                  now, now, now, metadata_json),
             )
-            memory_id = cursor.lastassert_id if hasattr(cursor, 'lastassert_id') else cursor.lastrowid
+            memory_id = cursor.lastrowid
             assert memory_id is not None
             memory_id = int(memory_id)
 
-            # Add to FAISS index
-            if embedding is not None:
-                faiss_id = self._next_faiss_id
-                emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
-                vec = emb.reshape(1, -1)
-                self._faiss_index.add(vec)
-                self._id_map[memory_id] = faiss_id
-                self._reverse_id_map[faiss_id] = memory_id
-                self._next_faiss_id += 1
+            # Add to FAISS index keyed by the memory's own id (IndexIDMap2)
+            if emb is not None:
+                vec = np.ascontiguousarray(emb.reshape(1, -1), dtype=np.float32)
+                self._faiss_index.add_with_ids(vec, np.asarray([memory_id], dtype=np.int64))
                 self._maybe_upgrade_faiss_index()
 
             # Associate entities
@@ -554,34 +571,24 @@ class AriadneDB:
         assert entity_id is not None
         return int(entity_id)
 
+    @_synchronized
     def get_memory(self, memory_id: int) -> dict[str, Any] | None:
         """Retrieve a memory by ID.
+
+        This is a **pure read**: it never mutates access statistics. Recording an
+        access is done explicitly via ``touch_memory``/``touch_memories`` (and
+        ``AriadneMemory.recall`` does it for the memories it actually surfaces).
+        Keeping reads side-effect free is what makes search fast — a single
+        search no longer issues one UPDATE + commit per candidate hit.
 
         Args:
             memory_id: The memory's unique ID.
 
         Returns:
-            Memory dict with all fields, or None if not found/deleted.
-
-        Optimization: Uses a SQLite trigger (memories_access_log) to
-        auto-insert into access_log when access_count is incremented.
-        This reduces the touch operation from 2 writes (UPDATE + INSERT)
-        to a single UPDATE write, improving throughput by ~2x for
-        read-heavy workloads.
+            Memory dict with all fields, or None if not found.
         """
         assert self._conn is not None
         try:
-            now = _now()
-            # Update access info — the access_log trigger handles logging automatically
-            self._conn.execute(
-                """UPDATE memories
-                   SET accessed_at = ?, access_count = access_count + 1
-                   WHERE id = ?""",
-                (now, memory_id),
-            )
-            self._commit()
-
-            # Now read the updated data
             cursor = self._conn.execute(
                 """SELECT id, content, content_hash, memory_type, importance,
                           created_at, updated_at, accessed_at, access_count,
@@ -611,6 +618,43 @@ class AriadneDB:
             logger.error("Database error getting memory %d: %s", memory_id, e)
             return None
 
+    @_synchronized
+    def touch_memory(self, memory_id: int) -> None:
+        """Record a single memory access. See ``touch_memories``."""
+        self.touch_memories([memory_id])
+
+    @_synchronized
+    def touch_memories(self, memory_ids: list[int]) -> None:
+        """Record an access for several memories in a single transaction.
+
+        Increments ``access_count``, refreshes ``accessed_at``, and grows the
+        stored ``retention_strength`` by ``retention_growth_factor`` (capped at
+        ``retention_strength_cap``). This is the spacing-effect model — memories
+        strengthen each time they are recalled — and feeds back into
+        ``compute_retention_strength``. The ``memories_access_log`` trigger logs
+        each access automatically.
+        """
+        if not memory_ids:
+            return
+        assert self._conn is not None
+        now = _now()
+        growth = self._config.retention_growth_factor
+        cap = self._config.retention_strength_cap
+        placeholders = ",".join("?" * len(memory_ids))
+        try:
+            self._conn.execute(
+                f"""UPDATE memories
+                    SET accessed_at = ?,
+                        access_count = access_count + 1,
+                        retention_strength = MIN(?, retention_strength * ?)
+                    WHERE id IN ({placeholders}) AND is_deleted = 0""",
+                [now, cap, growth, *memory_ids],
+            )
+            self._commit()
+        except sqlite3.Error as e:
+            logger.error("Error touching memories: %s", e)
+
+    @_synchronized
     def update_memory(
         self,
         memory_id: int,
@@ -648,12 +692,13 @@ class AriadneDB:
 
             if importance is not None:
                 updates.append("importance = ?")
-                params.append(importance)
+                params.append(_clamp01(importance))
 
             if metadata is not None:
                 updates.append("metadata = ?")
                 params.append(json.dumps(metadata))
 
+            emb: np.ndarray | None = None
             if embedding is not None:
                 emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
                 updates.append("embedding = ?")
@@ -665,13 +710,16 @@ class AriadneDB:
                 params,
             )
 
-            # Update FAISS if embedding changed
-            if embedding is not None and memory_id in self._id_map:
-                # Update FAISS if embedding changed
-                # We can't update in-place for most FAISS indices — note the change
-                # For production, would need index rebuild
-                pass
-                logger.debug("Updated embedding for memory %d (FAISS rebuild needed)", memory_id)
+            # Keep FAISS in sync: IndexIDMap2 lets us replace a vector by its id.
+            if emb is not None:
+                id_array = np.asarray([memory_id], dtype=np.int64)
+                try:
+                    self._faiss_index.remove_ids(id_array)
+                except Exception as e:  # pragma: no cover - depends on index state
+                    logger.debug("FAISS remove during update skipped: %s", e)
+                vec = np.ascontiguousarray(emb.reshape(1, -1), dtype=np.float32)
+                self._faiss_index.add_with_ids(vec, id_array)
+                self._maybe_upgrade_faiss_index()
 
             self._commit()
             logger.info("Updated memory %d", memory_id)
@@ -681,6 +729,7 @@ class AriadneDB:
             logger.error("Database error updating memory %d: %s", memory_id, e)
             return False
 
+    @_synchronized
     def delete_memory(self, memory_id: int, hard: bool = False) -> bool:
         """Delete a memory (soft or hard).
 
@@ -705,11 +754,12 @@ class AriadneDB:
                 self._conn.execute("DELETE FROM memory_links WHERE source_id = ? OR target_id = ?",
                                    (memory_id, memory_id))
                 self._conn.execute("DELETE FROM access_log WHERE memory_id = ?", (memory_id,))
-                # Remove from FAISS
-                if memory_id in self._id_map:
-                    faiss_id = self._id_map[memory_id]
-                    del self._id_map[memory_id]
-                    del self._reverse_id_map[faiss_id]
+                # Remove the vector from FAISS by its id (IndexIDMap2)
+                if self._faiss_index is not None:
+                    try:
+                        self._faiss_index.remove_ids(np.asarray([memory_id], dtype=np.int64))
+                    except Exception as e:  # pragma: no cover - depends on index state
+                        logger.debug("FAISS remove_ids during hard delete skipped: %s", e)
             else:
                 now = _now()
                 self._conn.execute(
@@ -725,6 +775,7 @@ class AriadneDB:
             logger.error("Database error deleting memory %d: %s", memory_id, e)
             return False
 
+    @_synchronized
     def vector_search(
         self, embedding: np.ndarray, k: int = 10
     ) -> list[dict[str, Any]]:
@@ -751,10 +802,8 @@ class AriadneDB:
             for dist, idx in zip(distances[0], indices[0]):
                 if idx < 0:
                     continue
-                internal_id = self._reverse_id_map.get(int(idx))
-                if internal_id is None:
-                    continue
-                memory = self.get_memory(internal_id)
+                # With IndexIDMap2 the returned label is the memory's own id.
+                memory = self.get_memory(int(idx))
                 if memory is not None and not memory["is_deleted"]:
                     memory["score"] = float(dist)
                     memory["search_type"] = "vector"
@@ -765,6 +814,7 @@ class AriadneDB:
             logger.error("Vector search error: %s", e)
             return []
 
+    @_synchronized
     def search_vector_batch(
         self, query_embeddings: np.ndarray, k: int = 10
     ) -> list[list[dict[str, Any]]]:
@@ -807,10 +857,8 @@ class AriadneDB:
                 for dist, idx in zip(distances[query_idx], indices[query_idx]):
                     if idx < 0:
                         continue
-                    internal_id = self._reverse_id_map.get(int(idx))
-                    if internal_id is None:
-                        continue
-                    memory = self.get_memory(internal_id)
+                    # With IndexIDMap2 the returned label is the memory's own id.
+                    memory = self.get_memory(int(idx))
                     if memory is not None and not memory["is_deleted"]:
                         memory["score"] = float(dist)
                         memory["search_type"] = "vector_batch"
@@ -822,6 +870,7 @@ class AriadneDB:
             logger.error("Batch vector search error: %s", e)
             return [[] for _ in range(len(query_embeddings))]
 
+    @_synchronized
     def fts_search(self, query: str, k: int = 10) -> list[dict[str, Any]]:
         """Search memories by full-text keyword matching.
 
@@ -834,15 +883,22 @@ class AriadneDB:
         """
         assert self._conn is not None
         try:
-            fts_query = _fts_escape(query)
-            cursor = self._conn.execute(
-                """SELECT rowid, rank FROM memories_fts
-                   WHERE memories_fts MATCH ?
-                   ORDER BY rank
-                   LIMIT ?""",
-                (fts_query, k),
-            )
-            rows = cursor.fetchall()
+            # Precision first (AND), then fall back to recall (OR) when AND finds
+            # nothing. This avoids the old behaviour where every term was ORed,
+            # so any single shared stopword dragged in unrelated memories.
+            rows: list[Any] = []
+            for op in ("AND", "OR"):
+                fts_query = _fts_escape(query, op=op)
+                cursor = self._conn.execute(
+                    """SELECT rowid, rank FROM memories_fts
+                       WHERE memories_fts MATCH ?
+                       ORDER BY rank
+                       LIMIT ?""",
+                    (fts_query, k),
+                )
+                rows = cursor.fetchall()
+                if rows:
+                    break
 
             results = []
             for rowid, rank in rows:
@@ -857,6 +913,7 @@ class AriadneDB:
             logger.error("FTS search error: %s", e)
             return []
 
+    @_synchronized
     def hybrid_search(
         self,
         query: str,
@@ -933,6 +990,7 @@ class AriadneDB:
                 results.append(memory)
         return results
 
+    @_synchronized
     def add_edge(
         self,
         source_entity: str,
@@ -962,6 +1020,7 @@ class AriadneDB:
         except sqlite3.Error as e:
             logger.error("Error adding edge: %s", e)
 
+    @_synchronized
     def traverse_graph(
         self,
         entity_name: str,
@@ -994,21 +1053,24 @@ class AriadneDB:
             hops = min(hops, self._config.max_graph_depth)
 
             edge_filter = ""
-            params: list[Any] = [source_id, hops, hops]
+            params: list[Any] = [source_id, hops]
             if edge_type:
                 edge_filter = "AND e.edge_type = ?"
                 params.append(edge_type)
 
-            # Recursive CTE for BFS
+            # Recursive CTE for BFS. Edges are treated as undirected: from the
+            # current node we step to *the other* endpoint of any incident edge
+            # (the previous version chose the next node by depth, so it only ever
+            # followed outgoing edges and missed incoming ones). UNION dedupes
+            # (node_id, depth) pairs, which also terminates cycles.
             query = f"""
                 WITH RECURSIVE graph_traverse(node_id, depth) AS (
                     SELECT ?, 0
                     UNION
-                    SELECT CASE
-                        WHEN gt.depth < ?
-                        THEN e.target_id
-                        ELSE e.source_id
-                    END, gt.depth + 1
+                    SELECT
+                        CASE WHEN e.source_id = gt.node_id
+                             THEN e.target_id ELSE e.source_id END,
+                        gt.depth + 1
                     FROM graph_traverse gt
                     JOIN edges e ON (
                         e.source_id = gt.node_id
@@ -1064,8 +1126,12 @@ class AriadneDB:
     def compute_retention_strength(self, memory: dict[str, Any]) -> float:
         """Compute Ebbinghaus retention score for a memory.
 
-        Uses R = e^(-t/S) where t is time since last access and S is
-        the retention half-life adjusted by importance.
+        Uses R = e^(-t/S) where t is time since last access and S is the
+        stability. Stability grows with both ``importance`` and the accrued
+        ``retention_strength`` — which ``touch_memories`` multiplies up on every
+        access — so frequently recalled memories decay more slowly (the spacing
+        effect). This is the behaviour the docs promised but the column never
+        actually fed into before.
 
         Args:
             memory: Memory dict with timing fields.
@@ -1074,13 +1140,12 @@ class AriadneDB:
             Retention strength (0.0-1.0).
 
         Optimization: Delegates to a cached helper that takes hashable primitives
-        with time-bucketed now value (1-second granularity). This allows repeated
-        calls for the same memory within a short time window to hit the LRU cache,
-        avoiding redundant math.exp() computations during eviction.
+        with time-bucketed now value (1-second granularity).
         """
         return _cached_retention_strength(
             memory["accessed_at"],
             memory["importance"],
+            float(memory.get("retention_strength", 1.0) or 0.0),
             self._config.retention_half_life,
             int(_now()),  # Bucket to 1-second granularity for cache hits
         )
@@ -1116,11 +1181,13 @@ class AriadneDB:
             now_bucket,
         )
 
+    @_synchronized
     def evict(self) -> int:
         """Evict low-priority memories via soft delete.
 
         Removes memories with the lowest priority scores up to
-        the configured eviction budget.
+        the configured eviction budget, then prunes the access log so it does
+        not grow without bound.
 
         Returns:
             Number of memories evicted.
@@ -1168,6 +1235,7 @@ class AriadneDB:
                 evicted += 1
 
             self._commit()
+            self.prune_access_log()
             logger.info("Evicted %d low-priority memories", evicted)
             return evicted
 
@@ -1175,19 +1243,25 @@ class AriadneDB:
             logger.error("Eviction error: %s", e)
             return 0
 
+    @_synchronized
     def consolidate(self) -> int:
-        """Consolidate similar memories using Jaccard similarity.
+        """Consolidate similar memories.
 
-        Groups memories with similarity above threshold and creates
-        consolidated summaries.
+        Groups memories whose token sets exceed ``consolidation_threshold``
+        (Jaccard) and, for each group, creates a single merged memory (with the
+        mean of the members' embeddings so it stays vector-searchable), then
+        soft-deletes the originals and links them to the consolidated memory.
+        Previously this only wrote a dangling summary row and left every
+        original in place, so nothing was ever actually consolidated.
 
         Returns:
             Number of consolidation groups created.
         """
         assert self._conn is not None
+        dim = self._config.embedding_dim
         try:
             cursor = self._conn.execute(
-                """SELECT id, content, content_hash, importance, created_at
+                """SELECT id, content, importance, embedding, created_at
                    FROM memories
                    WHERE is_deleted = 0
                    ORDER BY created_at DESC
@@ -1197,65 +1271,166 @@ class AriadneDB:
             if len(rows) < self._config.consolidation_min_group:
                 return 0
 
-            # Tokenize and group
             token_sets: dict[int, set[str]] = {}
             memories: list[dict[str, Any]] = []
             for row in rows:
                 mid = row[0]
-                tokens = set(row[1].lower().split())
-                token_sets[mid] = tokens
+                token_sets[mid] = set(row[1].lower().split())
                 memories.append({
                     "id": mid,
                     "content": row[1],
-                    "importance": row[3],
-                    "created_at": row[4],
+                    "importance": row[2],
+                    "embedding": row[3],
                 })
 
-            # Find groups
+            # Greedy grouping by pairwise Jaccard similarity.
             used: set[int] = set()
             groups: list[list[dict[str, Any]]] = []
-
             for i, mem_a in enumerate(memories):
                 if mem_a["id"] in used:
                     continue
                 group = [mem_a]
                 used.add(mem_a["id"])
-
-                for j, mem_b in enumerate(memories):
-                    if j <= i or mem_b["id"] in used:
+                for j in range(i + 1, len(memories)):
+                    mem_b = memories[j]
+                    if mem_b["id"] in used:
                         continue
                     sim = _jaccard_similarity(token_sets[mem_a["id"]], token_sets[mem_b["id"]])
                     if sim >= self._config.consolidation_threshold:
                         group.append(mem_b)
                         used.add(mem_b["id"])
-
                 if len(group) >= self._config.consolidation_min_group:
                     groups.append(group)
 
-            # Create consolidation records
             consolidated = 0
             for group in groups:
-                contents = [m["content"] for m in group]
-                avg_importance = sum(m["importance"] for m in group) / len(group)
-                consolidated_content = " | ".join(contents)
-                memory_ids = json.dumps([m["id"] for m in group])
+                merged_content = " | ".join(m["content"] for m in group)
+                importance = max(m["importance"] for m in group)
+                group_ids = [m["id"] for m in group]
+
+                # Mean embedding across members that carry one of the right dim.
+                vecs = []
+                for m in group:
+                    blob = m["embedding"]
+                    if blob is None:
+                        continue
+                    v = np.frombuffer(blob, dtype=np.float32)
+                    if v.shape[0] == dim:
+                        vecs.append(v)
+                mean_emb = np.mean(np.vstack(vecs), axis=0) if vecs else None
+
+                new = self.add_memory(
+                    merged_content,
+                    embedding=mean_emb,
+                    memory_type="semantic",
+                    importance=importance,
+                    metadata={"consolidated_from": group_ids},
+                )
+                new_id = new["memory_id"]
 
                 self._conn.execute(
                     """INSERT INTO consolidations
                        (memory_ids, consolidated_content, consolidated_importance, created_at)
                        VALUES (?, ?, ?, ?)""",
-                    (memory_ids, consolidated_content, avg_importance, _now()),
+                    (json.dumps(group_ids), merged_content, importance, _now()),
                 )
+
+                now = _now()
+                for mid in group_ids:
+                    self._conn.execute(
+                        "UPDATE memories SET is_deleted = 1, deleted_at = ? WHERE id = ?",
+                        (now, mid),
+                    )
+                    self._conn.execute(
+                        """INSERT OR IGNORE INTO memory_links
+                           (source_id, target_id, link_type, strength, created_at)
+                           VALUES (?, ?, 'consolidated', 1.0, ?)""",
+                        (new_id, mid, now),
+                    )
+                    # The retired original's vector is dropped from the live index.
+                    if self._faiss_index is not None:
+                        try:
+                            self._faiss_index.remove_ids(np.asarray([mid], dtype=np.int64))
+                        except Exception:  # pragma: no cover - depends on index state
+                            pass
                 consolidated += 1
 
             self._commit()
-            logger.info("Created %d consolidation groups", consolidated)
+            logger.info("Consolidated %d groups", consolidated)
             return consolidated
 
         except sqlite3.Error as e:
             logger.error("Consolidation error: %s", e)
             return 0
 
+    @_synchronized
+    def prune_access_log(self, keep_per_memory: int | None = None) -> int:
+        """Keep only the most recent ``keep_per_memory`` access_log rows per memory.
+
+        The access log gains a row on every recall; without pruning it grows
+        without bound. Returns the number of rows deleted.
+        """
+        assert self._conn is not None
+        keep = keep_per_memory or self._config.max_access_log_per_memory
+        try:
+            cursor = self._conn.execute(
+                """DELETE FROM access_log
+                   WHERE id IN (
+                       SELECT id FROM (
+                           SELECT id, ROW_NUMBER() OVER (
+                               PARTITION BY memory_id
+                               ORDER BY accessed_at DESC, id DESC
+                           ) AS rn
+                           FROM access_log
+                       ) WHERE rn > ?
+                   )""",
+                (keep,),
+            )
+            deleted = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            self._commit()
+            if deleted:
+                logger.info("Pruned %d old access_log rows", deleted)
+            return deleted
+        except sqlite3.Error as e:
+            logger.error("Access log prune error: %s", e)
+            return 0
+
+    @_synchronized
+    def purge_deleted(self, older_than_seconds: float = 0.0) -> int:
+        """Permanently remove soft-deleted memories (and their vectors/links).
+
+        ``older_than_seconds`` keeps recently soft-deleted rows recoverable; pass
+        0 to purge everything currently marked deleted. Returns the count purged.
+        """
+        assert self._conn is not None
+        cutoff = _now() - older_than_seconds
+        try:
+            cursor = self._conn.execute(
+                """SELECT id FROM memories
+                   WHERE is_deleted = 1 AND (deleted_at IS NULL OR deleted_at <= ?)""",
+                (cutoff,),
+            )
+            ids = [int(r[0]) for r in cursor.fetchall()]
+            for mid in ids:
+                self._conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
+                self._conn.execute("DELETE FROM memory_entities WHERE memory_id = ?", (mid,))
+                self._conn.execute(
+                    "DELETE FROM memory_links WHERE source_id = ? OR target_id = ?", (mid, mid)
+                )
+                self._conn.execute("DELETE FROM access_log WHERE memory_id = ?", (mid,))
+                if self._faiss_index is not None:
+                    try:
+                        self._faiss_index.remove_ids(np.asarray([mid], dtype=np.int64))
+                    except Exception:  # pragma: no cover - depends on index state
+                        pass
+            self._commit()
+            logger.info("Purged %d soft-deleted memories", len(ids))
+            return len(ids)
+        except sqlite3.Error as e:
+            logger.error("Purge error: %s", e)
+            return 0
+
+    @_synchronized
     def stats(self) -> dict[str, Any]:
         """Get comprehensive database statistics.
 
@@ -1300,7 +1475,10 @@ class AriadneDB:
             # FAISS index
             if self._faiss_index is not None:
                 result["faiss_vectors"] = self._faiss_index.ntotal
-                result["faiss_type"] = type(self._faiss_index).__name__
+                base_index = self._faiss_index
+                if isinstance(base_index, faiss.IndexIDMap2):
+                    base_index = faiss.downcast_index(base_index.index)
+                result["faiss_type"] = type(base_index).__name__
                 result["faiss_dimension"] = self._config.embedding_dim
             else:
                 result["faiss_vectors"] = 0
@@ -1332,19 +1510,25 @@ class AriadneDB:
 def _cached_retention_strength(
     accessed_at: float,
     importance: float,
+    retention_strength: float,
     retention_half_life: float,
     now_bucket: int,
 ) -> float:
     """Cached Ebbinghaus retention score computation (module-level for lru_cache).
 
+    Stability S = half_life * importance * retention_strength. retention_strength
+    starts at 1.0 and is multiplied up on each access (capped), so repeatedly
+    recalled memories decay more slowly.
+
     Args:
         accessed_at: Last access timestamp.
         importance: Memory importance score.
+        retention_strength: Accrued stability multiplier (>= 0).
         retention_half_life: Configured half-life in seconds.
         now_bucket: Current time floored to integer seconds.
     """
     time_since_access = float(now_bucket) - accessed_at
-    half_life = retention_half_life * importance
+    half_life = retention_half_life * max(importance, 0.0) * max(retention_strength, 0.0)
     if half_life <= 0:
         return 0.0
     return math.exp(-time_since_access / half_life)

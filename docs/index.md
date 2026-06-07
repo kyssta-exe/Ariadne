@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Ariadne"
   text: "Memory for AI agents"
-  tagline: "Sub-millisecond search. Zero infrastructure."
+  tagline: "Local-first hybrid search + knowledge graph. Zero infrastructure."
   actions:
     - theme: brand
       text: Get Started
@@ -14,18 +14,18 @@ hero:
       link: https://github.com/kyssta-exe/Ariadne
 
 features:
-  - title: "0.78ms vector search"
-    details: "FAISS-powered. 196× faster than sqlite-vec. Scales to millions of memories."
+  - title: "Vector search (FAISS)"
+    details: "In-process FAISS index. Auto-upgrades from exact (Flat) to approximate (IVF) as your data grows."
   - title: "Hybrid retrieval"
-    details: "Vector similarity + keyword search + graph traversal. Reciprocal Rank Fusion. 92% recall."
+    details: "Vector similarity + FTS5 keywords, fused with Reciprocal Rank Fusion."
   - title: "Knowledge graph"
-    details: "Typed entities, relationships, multi-hop traversal. One query walks the full chain."
+    details: "Typed entities and relationships, multi-hop traversal. Edges are walked in both directions."
   - title: "Cognitive retention"
     details: "Ebbinghaus forgetting curve. Memories strengthen with use, fade without it."
   - title: "Auto-dedup"
-    details: "MinHash LSH catches near-duplicates at 0.12ms before they enter the system."
+    details: "MinHash LSH catches near-duplicates before they enter the store. Survives restarts."
   - title: "Zero infrastructure"
-    details: "SQLite + FAISS. One .db file. No Docker, no Redis, no API keys, no daemon."
+    details: "SQLite + FAISS, one .db file. No Docker, no Redis, no API keys, no daemon. Thread-safe."
 ---
 
 <div class="hero-benchmarks">
@@ -34,39 +34,41 @@ features:
 
 ```python
 from arriadne import AriadneMemory
+from arriadne.embeddings import SentenceTransformerEmbedder
 
-memory = AriadneMemory("./my-memory.db")
+# An embedder turns text into vectors so semantic recall works automatically.
+embedder = SentenceTransformerEmbedder("all-MiniLM-L6-v2")  # 384-dim
+
+mem = AriadneMemory(db_path="memory.db", embedding_dim=embedder.dim, embedder=embedder)
 
 # Store a memory
-memory.add(
-    content="VPS has 4 cores, 8GB RAM, Ubuntu 24.04",
-    source="system",
-    importance=0.8,
-)
+mem.remember("VPS has 4 cores, 8GB RAM, Ubuntu 24.04", importance=0.8)
 
-# Search — vector + keyword + graph, fused
-results = memory.search("server specs", limit=5)
-# → [<Memory content="VPS has 4 cores..." score=0.94>]
+# Search — vector + keyword, fused
+results = mem.recall("server specs", k=5)
+# → [{"content": "VPS has 4 cores...", "score": 0.94, ...}]
 ```
 
 </div>
 
 <div class="hero-compare">
 
-| | Ariadne | Mnemosyne | Mem0 | ChromaDB |
+| Capability | Ariadne | Chroma | sqlite-vec | Mem0 |
 |---|:---:|:---:|:---:|:---:|
-| Vector search | **0.78ms** | 153ms | 12ms | 8ms |
-| Hybrid search | ✅ | ❌ | ❌ | ⚠️ |
-| Knowledge graph | ✅ | ⚠️ | ❌ | ❌ |
-| Runs locally | ✅ | ✅ | ❌ | ✅ |
-| No daemon | ✅ | ✅ | ❌ | ❌ |
+| Vector search | ✅ | ✅ | ✅ | ✅ |
+| Keyword + hybrid (RRF) | ✅ | ⚠️ | ❌ | ⚠️ |
+| Knowledge graph | ✅ | ❌ | ❌ | ⚠️ |
+| Near-dup dedup | ✅ | ❌ | ❌ | ⚠️ |
+| Local, no daemon | ✅ | ✅ | ✅ | ❌ |
+
+<sub>Capability comparison, not a benchmark. ✅ built-in · ⚠️ partial/varies · ❌ not available.</sub>
 
 </div>
 
 <div class="hero-install">
 
 ```bash
-pip install arriadne
+pip install "arriadne[embeddings]"
 ```
 
 </div>

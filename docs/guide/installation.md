@@ -92,10 +92,11 @@ No GPU required. FAISS CPU is used by default and is fast enough for 100K+ vecto
 
 ```
 ~/.ariadne/
-  └── memory.db          # SQLite database (memories, entities, edges, FTS5)
-  └── memory.db.faiss    # FAISS vector index
+  └── memory.db          # SQLite database (memories + embeddings, entities, edges, FTS5)
   └── memory.db-wal      # SQLite WAL log (auto-cleaned)
   └── memory.db-shm      # SQLite shared memory (auto-cleaned)
 ```
 
-You can back up, rsync, or commit `memory.db` and `memory.db.faiss` anywhere. The WAL and SHM files are temporary and regenerated on open.
+Back up, rsync, or commit `memory.db` — it holds everything, including the
+embeddings. The FAISS index is rebuilt from it on open, so there is no separate
+index file. The WAL and SHM files are temporary and regenerated automatically.

@@ -40,6 +40,8 @@ class AriadneConfig:
     consolidation_min_group: int = 2
     eviction_budget: float = 0.1
     retention_half_life: float = 86400.0  # 1 day in seconds
+    retention_growth_factor: float = 1.5  # stability multiplier applied per access
+    retention_strength_cap: float = 100.0  # ceiling for accrued retention strength
     priority_weights: dict[str, float] = field(default_factory=lambda: {
         "importance": 0.4,
         "recency": 0.3,
@@ -50,6 +52,8 @@ class AriadneConfig:
     batch_size: int = 1000
     wal_autocheckpoint: int = 1000
     fts_tokenizer: str = "porter unicode61"
+    ivf_min_points: int = 1000  # min vectors before an explicit ivf_flat index trains
+    max_access_log_per_memory: int = 50  # access_log rows kept per memory after pruning
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -65,6 +69,20 @@ class AriadneConfig:
             raise ValueError(f"eviction_budget must be in (0, 1], got {self.eviction_budget}")
         if self.retention_half_life <= 0:
             raise ValueError(f"retention_half_life must be positive, got {self.retention_half_life}")
+        if self.retention_growth_factor < 1.0:
+            raise ValueError(
+                f"retention_growth_factor must be >= 1.0, got {self.retention_growth_factor}"
+            )
+        if self.retention_strength_cap < 1.0:
+            raise ValueError(
+                f"retention_strength_cap must be >= 1.0, got {self.retention_strength_cap}"
+            )
+        if self.ivf_min_points < 1:
+            raise ValueError(f"ivf_min_points must be >= 1, got {self.ivf_min_points}")
+        if self.max_access_log_per_memory < 1:
+            raise ValueError(
+                f"max_access_log_per_memory must be >= 1, got {self.max_access_log_per_memory}"
+            )
         match self.faiss_type:
             case "auto" | "flat_ip" | "ivf_flat":
                 pass

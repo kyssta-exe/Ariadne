@@ -1,97 +1,154 @@
 # Ariadne
 
-Memory for AI agents. Sub-millisecond search. Zero infrastructure.
+Memory for AI agents. Local-first hybrid search + knowledge graph. Zero infrastructure.
 
 [![PyPI](https://img.shields.io/pypi/v/arriadne.svg)](https://pypi.org/project/arriadne/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-143%20passed-brightgreen)](https://github.com/kyssta-exe/Ariadne/actions)
+[![Tests](https://img.shields.io/badge/tests-166%20passed-brightgreen)](https://github.com/kyssta-exe/Ariadne/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
 
 ## Quick Start
 
+```bash
+pip install "arriadne[embeddings]"
+```
+
 ```python
 from arriadne import AriadneMemory
+from arriadne.embeddings import SentenceTransformerEmbedder
 
-mem = AriadneMemory(db_path="memory.db", embedding_dim=384)
+# An embedder turns text into vectors so semantic recall works automatically.
+embedder = SentenceTransformerEmbedder("all-MiniLM-L6-v2")  # 384-dim
+
+mem = AriadneMemory(db_path="memory.db", embedding_dim=embedder.dim, embedder=embedder)
 
 mem.remember("VPS has 4 cores, 8GB RAM", importance=0.8)
 
+# Semantic match — "server specs" finds the memory despite sharing no keywords.
 results = mem.recall("server specs", k=5)
 ```
 
-```bash
-pip install arriadne
+Without the `[embeddings]` extra (or without an `embedder`), Ariadne still works
+as a fast **keyword** store — pass your own vectors to `remember`/`recall` for
+semantic search, or omit them for FTS-only matching:
+
+```python
+from arriadne import AriadneMemory
+
+mem = AriadneMemory(db_path="memory.db")          # no embedder
+mem.remember("deploy script lives in infra/deploy.sh")
+mem.recall("deploy script", k=5)                  # keyword match
 ```
 
 ---
 
 ## Why
 
-| | Ariadne | Mnemosyne | Mem0 | ChromaDB |
+Most "agent memory" options make you choose: a bare vector store (Chroma,
+sqlite-vec), or a hosted service (Mem0). Ariadne bundles vector + keyword +
+graph retrieval, deduplication, and a retention model into one local SQLite
+file — no daemon, no server, no API keys.
+
+| Capability | Ariadne | Chroma | sqlite-vec | Mem0 |
 |---|:---:|:---:|:---:|:---:|
-| Vector search | **0.78ms** | 153ms | 12ms | 8ms |
-| Hybrid search | ✅ RRF | ❌ | ❌ | ⚠️ basic |
-| Knowledge graph | ✅ BFS | ⚠️ basic | ❌ | ❌ |
-| Auto-dedup | ✅ MinHash | ❌ | ❌ | ❌ |
-| Runs locally | ✅ | ✅ | ❌ | ✅ |
-| No daemon | ✅ | ✅ | ❌ | ❌ |
+| Vector search | ✅ FAISS (auto Flat→IVF) | ✅ | ✅ | ✅ |
+| Keyword search (BM25/FTS5) | ✅ | ❌ | ❌ | ⚠️ |
+| Hybrid fusion (RRF) | ✅ | ⚠️ basic | ❌ | ⚠️ |
+| Knowledge graph (multi-hop) | ✅ | ❌ | ❌ | ⚠️ |
+| Near-duplicate dedup (MinHash) | ✅ | ❌ | ❌ | ⚠️ |
+| Retention / forgetting curve | ✅ | ❌ | ❌ | ⚠️ |
+| Runs fully local, no daemon | ✅ | ✅ | ✅ | ❌ |
+| Single file, zero infra | ✅ | ⚠️ | ✅ | ❌ |
+
+Capability comparison, not a benchmark — for latency, measure on your own
+hardware (see [Performance](#performance)). ✅ built-in · ⚠️ partial/varies · ❌ not available.
 
 ---
 
 ## Features
 
-### 0.78ms Vector Search
+### Vector search (FAISS)
 
-FAISS-powered. 196× faster than sqlite-vec. Auto-upgrades from exact to approximate search as your data grows.
+In-process FAISS index. Starts as exact `IndexFlatIP` and auto-upgrades to
+`IndexIVFFlat` once the dataset grows past `ivf_threshold`. Vectors are keyed by
+the memory's own id (`IndexIDMap2`) and rebuilt from the database on open, so the
+index can never drift out of sync after deletes or restarts.
 
-| Engine | 10K vectors | 100K vectors |
-|--------|:-----------:|:------------:|
-| FAISS (Ariadne) | **0.78ms** | **1.8ms** |
-| sqlite-vec | 153ms | 680ms |
+### Hybrid retrieval
 
-### Hybrid Retrieval
-
-Vector similarity + BM25 keywords + graph traversal, fused with Reciprocal Rank Fusion. 92% recall@10.
+Vector similarity + BM25 keywords (SQLite FTS5), fused with Reciprocal Rank
+Fusion. Keyword matching tries AND first (precise) and falls back to OR (recall).
 
 ```python
 results = mem.recall("how to deploy to production", k=5)
-# Searches both "deploy" (keyword) and semantic similarity in parallel
+# Runs keyword + vector search and fuses the rankings
 ```
 
-### Knowledge Graph
+### Knowledge graph
 
-Typed entities and relationships with multi-hop traversal via SQLite recursive CTEs:
+Typed entities and relationships with multi-hop traversal via SQLite recursive
+CTEs. Edges are walked in both directions:
 
 ```python
 mem.add_edge("WebApp", "API", edge_type="depends_on")
 mem.add_edge("API", "Database", edge_type="depends_on")
-mem.graph("WebApp", hops=2)  # → [API, Database]
+mem.graph("WebApp", hops=2)   # → API, Database
 ```
 
-### Cognitive Retention
+### Cognitive retention
 
-Ebbinghaus forgetting curve with stability growth on each access. Priority-weighted scoring from importance, recency, and access count. Memories strengthen with use, fade without it.
+Ebbinghaus forgetting curve `R = e^(-t/S)`. Stability `S` grows each time a
+memory is recalled (`retention_growth_factor`, capped) — memories strengthen
+with use and fade without it. Priority-weighted scoring from importance,
+recency, access count, and retention drives eviction.
 
-### Auto-Deduplication
+### Auto-deduplication
 
-MinHash LSH catches near-duplicates at 0.12ms before they enter the system.
+MinHash LSH catches near-duplicates before they enter the store; the index is
+rebuilt from the database on open so it survives restarts. Exact duplicates are
+caught by a SHA-256 content hash.
+
+### Built for agents
+
+Thread-safe (a single `AriadneMemory` can be shared across threads), reads are
+side-effect-free, and housekeeping (`evict` / `consolidate` / `prune_access_log`
+/ `purge_deleted`, or `maintenance()` for all four) keeps the store bounded.
 
 ---
 
 ## Performance
 
-Benchmarked on a 4-core 8GB VPS, 10K memories, 384-dim embeddings:
+Latency depends on your hardware, embedding dimension, and dataset size, so
+Ariadne ships no canned numbers — measure on your own box:
 
-| Operation | Latency |
-|-----------|---------|
-| Vector search (FAISS) | **0.78ms** |
-| Keyword search (FTS5) | **4.90ms** |
-| Hybrid search (RRF) | **2.15ms** |
-| Dedup check (MinHash) | **0.12ms** |
-| Memory insert | **0.50ms** |
-| Graph traversal (3 hops) | **50ms** |
+```bash
+pip install "arriadne[embeddings]"
+```
+
+```python
+import time, numpy as np
+from arriadne import AriadneMemory, AriadneConfig
+
+mem = AriadneMemory(config=AriadneConfig(db_path="bench.db", embedding_dim=384))
+vecs = np.random.randn(10_000, 384).astype("float32")
+for i, v in enumerate(vecs):
+    mem.remember(f"memory {i}", embedding=v)
+
+q = np.random.randn(384).astype("float32")
+t = time.perf_counter()
+for _ in range(1000):
+    mem.recall("query", embedding=q, k=10)
+print(f"recall avg: {(time.perf_counter() - t):.3f} ms/query")
+mem.close()
+```
+
+Architecturally: FAISS does similarity as a single BLAS matrix multiply (and
+switches to an inverted-file index at scale), keyword search rides SQLite's FTS5
+BM25 index, and graph traversal is a recursive CTE — all in-process, no network
+hops. See the [benchmarks guide](https://ariadne.mantes.net/benchmarks) for a
+fuller harness.
 
 ---
 

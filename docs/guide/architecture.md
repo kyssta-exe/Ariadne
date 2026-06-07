@@ -14,18 +14,23 @@ Ariadne is a single-process, zero-daemon memory system built on **SQLite** (with
 │                                                             │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │    FAISS     │  │    SQLite    │  │   MinHash LSH     │  │
-│  │  Vector Index│  │  Metadata +  │  │   Dedup Index     │  │
-│  │              │  │  FTS5 + Graph│  │   (in-memory)     │  │
-│  │  cosine sim  │  │  WAL mode    │  │   ~1ms lookup     │  │
+│  │ IndexIDMap2  │  │  Metadata +  │  │   Dedup Index     │  │
+│  │ (Flat / IVF) │  │  FTS5 + Graph│  │   (in-memory)     │  │
+│  │  cosine sim  │  │  + embeddings│  │                   │  │
 │  └─────────────┘  └──────────────┘  └───────────────────┘  │
 │                                                             │
-│  .faiss file      .db file            RAM only             │
+│  rebuilt on open   .db file           rebuilt on open       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+The SQLite `.db` file is the single source of truth. Embeddings are stored as
+BLOBs in the `memories` table; the FAISS index and the MinHash dedup index are
+both **rebuilt from the database on open**, so there is no separate index file
+to keep in sync.
+
 | Layer | Technology | Purpose | Persistence |
 |-------|-----------|---------|-------------|
-| Vector Search | FAISS (IndexFlatIP / IndexIVFFlat) | Semantic similarity | `.faiss` file |
+| Vector Search | FAISS `IndexIDMap2` over `IndexFlatIP` / `IndexIVFFlat` | Semantic similarity | Embeddings in `.db`; index rebuilt on open |
 | Metadata & FTS | SQLite 3 (WAL mode) | Structured data, keyword search, graph | `.db` file |
 | Dedup Index | MinHash LSH (datasketch) | Near-duplicate detection | In-memory (rebuilds from DB) |
 
@@ -198,44 +203,45 @@ END;
 
 ## FAISS Index Strategy
 
-Ariadne automatically selects the optimal FAISS index based on vector count:
+Every index is wrapped in `IndexIDMap2` and keyed on the memory's own primary
+key, so search returns ids directly and the mapping can't drift after deletes.
+The underlying index is chosen by vector count:
 
-| Condition | Index Type | Algorithm | Use Case |
-|-----------|-----------|-----------|----------|
-| `< 1,000` vectors | `IndexFlatIP` | Brute-force inner product | Small datasets, exact search |
-| `≥ 1,000` vectors | `IndexIVFFlat` | Inverted file index | Large datasets, approximate search |
+| Mode | Underlying index | Switches to IVF when |
+|------|------------------|----------------------|
+| `flat_ip` | `IndexFlatIP` (exact) | never |
+| `auto` (default) | `IndexFlatIP`, then `IndexIVFFlat` | `count ≥ ivf_threshold` (default 50,000) |
+| `ivf_flat` | `IndexFlatIP`, then `IndexIVFFlat` | `count ≥ ivf_min_points` (default 1,000) |
 
-### Auto-Upgrade
+### Staged upgrade (no untrained IVF)
 
-When `faiss_type="auto"` (default), Ariadne starts with `IndexFlatIP` and automatically upgrades to `IndexIVFFlat` when the vector count exceeds `ivf_threshold` (default: 1,000).
+An IVF index can't be added to until it's trained, and training needs enough
+samples. So **all** modes start on `IndexFlatIP` and switch to IVF only once
+there's enough data — `ivf_flat` no longer crashes on the first insert. The
+switch is a full rebuild from the database (see below).
 
 ```python
 from arriadne import AriadneConfig
 
 config = AriadneConfig(
-    faiss_type="auto",       # Default: auto-select
-    ivf_threshold=1000,      # Upgrade to IVFFlat at 1K vectors
-    ivf_nlist=256,           # Number of Voronoi cells
+    faiss_type="auto",       # default
+    ivf_threshold=50_000,    # auto: upgrade to IVF at this many vectors
+    ivf_nlist=128,           # cells; effective nlist = min(ivf_nlist, sqrt(n))
 )
 ```
 
-### Manual Index Selection
+### Rebuild from the database
 
-```python
-config = AriadneConfig(
-    faiss_type="flat_ip",    # Always use exact search
-    # OR
-    faiss_type="ivf_flat",   # Always use approximate search
-)
-```
+On open — and whenever the index upgrades to IVF — Ariadne rebuilds the index
+from the embeddings stored in the `memories` table:
 
-### IVFFlat Training
+1. Read `id, embedding` for every active (non-deleted) memory
+2. Create the appropriate base index with `nlist = min(ivf_nlist, √n)`
+3. Train it (IVF only) on those vectors
+4. `add_with_ids(vectors, ids)` and wrap in `IndexIDMap2`
 
-When upgrading to IVFFlat, Ariadne:
-1. Extracts all vectors from the FlatIP index
-2. Creates a new IVFFlat index with `nlist = min(ivf_nlist, initial_size // 10)`
-3. Trains the index on existing vectors
-4. Re-adds all vectors to the new index
+Because the database is the source of truth, soft-deleted vectors are pruned on
+the next open and the index can never disagree with stored metadata.
 
 ## Concurrency & WAL Mode
 
@@ -257,24 +263,33 @@ PRAGMA busy_timeout=5000;        -- 5 second busy timeout
 
 ### Thread Safety
 
-Ariadne's SQLite connection is not thread-safe by default. For multi-threaded applications:
+A single `AriadneDB` / `AriadneMemory` is safe to share across threads. The
+SQLite connection is opened with `check_same_thread=False`, and every public
+entry point is guarded by a reentrant lock (the SQLite + FAISS state in
+`AriadneDB`, and the in-memory MinHash index in `AriadneMemory`). Operations are
+serialized for correctness rather than run in parallel.
 
 ```python
-import sqlite3
+from arriadne import AriadneMemory
 
-# Each thread should create its own connection
-conn = sqlite3.connect("arriadne.db")
-conn.execute("PRAGMA journal_mode=WAL")
+mem = AriadneMemory(db_path="memory.db", embedding_dim=384)
+
+# Safe to call concurrently from multiple threads
+def worker():
+    mem.remember("...")
+    mem.recall("...")
 ```
 
 ## File Layout
 
 ```
-arriadne.db          # SQLite database (metadata, FTS5, graph)
-arriadne.db.faiss    # FAISS vector index
+arriadne.db          # SQLite database (metadata, FTS5, graph, embeddings)
 arriadne.db-wal      # WAL log (SQLite)
 arriadne.db-shm      # Shared memory (SQLite)
 ```
+
+There is no separate FAISS index file: vectors live in the `.db` and the index
+is rebuilt from them on open.
 
 ## Zero External Dependencies
 

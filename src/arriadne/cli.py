@@ -177,7 +177,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
         by_type = stats.get("by_type", {})
         if by_type:
-            print(f"\n  By type:")
+            print("\n  By type:")
             for t, count in sorted(by_type.items()):
                 print(f"    {t}: {count}")
 
@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--db-path",
         default="arriadne.db",
-        help="Path to database file (default: ariadne.db)",
+        help="Path to database file (default: arriadne.db)",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")

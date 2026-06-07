@@ -6,7 +6,6 @@ stress/load, graph edge cases, priority/retention edge cases, dedup edge cases.
 
 from __future__ import annotations
 
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -228,20 +227,20 @@ class TestInvalidInputs:
         assert "error" in result
 
     def test_negative_importance(self, empty_mem: AriadneMemory) -> None:
-        """Negative importance is accepted (no clamping at DB level)."""
+        """Negative importance is clamped to the documented [0, 1] range."""
         result = empty_mem.remember("negative imp", importance=-0.5)
         assert result["status"] == "created"
         memory = empty_mem._db.get_memory(result["memory_id"])
         assert memory is not None
-        assert memory["importance"] == -0.5
+        assert memory["importance"] == 0.0
 
     def test_importance_above_one(self, empty_mem: AriadneMemory) -> None:
-        """Importance > 1.0 is accepted (no clamping at DB level)."""
+        """Importance > 1.0 is clamped to 1.0."""
         result = empty_mem.remember("high imp", importance=2.5)
         assert result["status"] == "created"
         memory = empty_mem._db.get_memory(result["memory_id"])
         assert memory is not None
-        assert memory["importance"] == 2.5
+        assert memory["importance"] == 1.0
 
     def test_missing_embedding(self, empty_mem: AriadneMemory) -> None:
         """None embedding is fine — should not add to FAISS."""
@@ -746,9 +745,9 @@ class TestPriorityEdgeCases:
         result = empty_db.add_memory("Frequently accessed", importance=1.0)
         mid = result["memory_id"]
 
-        # Access many times (get_memory updates accessed_at and access_count)
+        # Access many times (touch records access; get_memory is a pure read)
         for _ in range(50):
-            empty_db.get_memory(mid)
+            empty_db.touch_memory(mid)
 
         memory = empty_db.get_memory(mid)
         assert memory is not None
@@ -1021,15 +1020,18 @@ class TestCombinedEdgeCases:
         assert cursor.fetchone()[0] == 0
 
     def test_importance_clamp_edge(self, empty_db: AriadneDB) -> None:
-        """Test importance at boundaries (0, 1, and beyond)."""
-        values = [0.0, 1.0, -0.001, 1.001, 0.5, -100.0, 100.0]
-        for v in values:
-            content = f"importance_test_val_{v}"
-            r = empty_db.add_memory(content, importance=v)
+        """Importance is clamped into [0, 1] at the boundaries and beyond."""
+        cases = [
+            (0.0, 0.0), (1.0, 1.0), (-0.001, 0.0), (1.001, 1.0),
+            (0.5, 0.5), (-100.0, 0.0), (100.0, 1.0),
+        ]
+        for given, expected in cases:
+            content = f"importance_test_val_{given}"
+            r = empty_db.add_memory(content, importance=given)
             assert r["status"] == "created"
             memory = empty_db.get_memory(r["memory_id"])
             assert memory is not None
-            assert memory["importance"] == v  # Stored as-is
+            assert memory["importance"] == expected
 
     def test_fts_and_vector_together(self, empty_mem: AriadneMemory) -> None:
         """Hybrid search with both FTS and vector on edge content."""

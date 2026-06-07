@@ -1,25 +1,25 @@
 name: ariadne
 version: 0.1.2
-description: "Ariadne memory provider for Hermes — FAISS vector search + FTS5 + knowledge graph + cognitive retention. Zero cloud, zero daemon. 196× faster than sqlite-vec."
+description: "Ariadne memory provider for Hermes — FAISS vector search + FTS5 + knowledge graph + cognitive retention. Zero cloud, zero daemon."
 author: Kyssta
 provides_tools:
-  - mnemosyne_remember
-  - mnemosyne_recall
-  - mnemosyne_stats
-  - mnemosyne_forget
-  - mnemosyne_update
-  - mnemosyne_invalidate
-  - mnemosyne_export
-  - mnemosyne_import
-  - mnemosyne_diagnose
-  - mnemosyne_graph_query
-  - mnemosyne_graph_link
-  - mnemosyne_sleep
-  - mnemosyne_scratchpad_write
-  - mnemosyne_scratchpad_read
-  - mnemosyne_scratchpad_clear
-  - mnemosyne_shared_remember
-  - mnemosyne_shared_recall
-  - mnemosyne_shared_forget
-  - mnemosyne_shared_stats
+  - ariadne_remember
+  - ariadne_recall
+  - ariadne_stats
+  - ariadne_forget
+  - ariadne_update
+  - ariadne_invalidate
+  - ariadne_export
+  - ariadne_import
+  - ariadne_diagnose
+  - ariadne_graph_query
+  - ariadne_graph_link
+  - ariadne_sleep
+  - ariadne_scratchpad_write
+  - ariadne_scratchpad_read
+  - ariadne_scratchpad_clear
+  - ariadne_shared_remember
+  - ariadne_shared_recall
+  - ariadne_shared_forget
+  - ariadne_shared_stats
 dependencies: []

@@ -1,6 +1,6 @@
 ---
 title: "Deduplication — Ariadne"
-description: "MinHash LSH near-duplicate detection at 0.12ms. Automatic deduplication on memory insert."
+description: "MinHash LSH near-duplicate detection, automatic on memory insert and persistent across restarts."
 ---
 
 
@@ -15,6 +15,11 @@ Ariadne uses **MinHash LSH** (Locality-Sensitive Hashing) for near-duplicate det
 3. **Compute MinHash** — a compact signature that approximates Jaccard similarity
 4. **LSH lookup** — find candidates with similar signatures in sub-linear time
 5. **Exact Jaccard** — compute true similarity only for LSH candidates
+
+The dedup index lives in memory but is **rebuilt from the database when you open
+`AriadneMemory`**, so near-duplicate detection works across restarts — not just
+within a single session. Exact (byte-identical) duplicates are additionally
+caught by a SHA-256 content hash in the storage layer.
 
 ### Configuration
 

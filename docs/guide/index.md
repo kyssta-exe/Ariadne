@@ -1,6 +1,6 @@
 ---
 title: "Introduction — Ariadne"
-description: "Ariadne is a local memory system for AI agents. Sub-millisecond hybrid search, cognitive retention, and knowledge graph traversal. Zero infrastructure."
+description: "Ariadne is a local memory system for AI agents: hybrid search, cognitive retention, and knowledge graph traversal. Zero infrastructure."
 ---
 
 
@@ -8,13 +8,15 @@ description: "Ariadne is a local memory system for AI agents. Sub-millisecond hy
 
 ## Why Ariadne?
 
-Current AI memory systems force you to choose between:
+Current AI memory options tend to force a choice:
 
 - **Fast but simple** — keyword search, no semantic understanding
-- **Semantic but slow** — vector search that takes 100ms+ per query  
-- **Feature-rich but heavy** — requires a running server, database, and API keys
+- **Semantic but heavy** — a vector store you still have to run and operate
+- **Feature-rich but hosted** — requires a running server, database, or API keys
 
-Ariadne gives you **all three**: sub-millisecond search, semantic understanding, and a full-featured memory system that runs as a single Python library with zero external dependencies.
+Ariadne bundles all of it — vector + keyword + graph retrieval, deduplication,
+and a retention model — into a single Python library backed by one SQLite file,
+with no daemon and no external dependencies.
 
 ## Architecture
 
@@ -25,8 +27,7 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
 │  │  FAISS   │  │  FTS5    │  │  Knowledge   │  │
 │  │  Vector  │  │  Keyword │  │  Graph       │  │
-│  │  Search  │  │  Search  │  │  (BFS/DFS)   │  │
-│  │  0.78ms  │  │  4.90ms  │  │  50ms        │  │
+│  │  (cosine)│  │  (BM25)  │  │  (recursive) │  │
 │  └────┬─────┘  └────┬─────┘  └──────┬───────┘  │
 │       │              │               │           │
 │       └──────┬───────┴───────────────┘           │
@@ -34,7 +35,6 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 │     ┌────────▼─────────┐                         │
 │     │ Reciprocal Rank  │                         │
 │     │    Fusion        │                         │
-│     │    2.15ms        │                         │
 │     └────────┬─────────┘                         │
 │              │                                   │
 │  ┌───────────▼────────────────────────────────┐  │
@@ -44,24 +44,25 @@ Ariadne gives you **all three**: sub-millisecond search, semantic understanding,
 └─────────────────────────────────────────────────┘
 ```
 
-## Performance
-
-| Operation | Latency | Scale |
-|-----------|---------|-------|
-| Vector search (FAISS) | **0.78ms** | 10K memories |
-| Keyword search (FTS5) | **4.90ms** | 10K memories |
-| Hybrid search (RRF) | **2.15ms** | 10K memories |
-| Dedup check (MinHash LSH) | **0.12ms** | 10K documents |
-| Graph traversal (3 hops) | **50ms** | 10K nodes |
+Vectors are stored as BLOBs in SQLite and the FAISS index is rebuilt from them on
+open, so the whole system is one `.db` file. For latency, measure on your own
+hardware with the [benchmarks harness](../benchmarks).
 
 ## What Makes It Different
 
-1. **SQLite + FAISS** — Not sqlite-vec (200× slower). Not PostgreSQL (requires a server). Just SQLite for metadata/FTS5/graph, FAISS for vectors. Both embedded in-process.
+1. **SQLite + FAISS, in-process** — SQLite for metadata, FTS5, and the graph;
+   FAISS for vectors. No server, no sqlite-vec row scan, no PostgreSQL.
 
-2. **Ebbinghaus Forgetting Curve** — Memories strengthen with each access and fade without it. Stability grows exponentially with reinforcement.
+2. **Ebbinghaus forgetting curve** — memories strengthen with each access
+   (`retention_strength` grows, capped) and fade without it.
 
-3. **Priority-Based Retention** — When the memory budget is hit, low-priority memories get soft-deleted. High-importance memories are protected.
+3. **Priority-based retention** — when you run eviction, the lowest-priority
+   memories (importance, recency, access count, retention) are soft-deleted
+   first.
 
-4. **Auto-Deduplication** — MinHash LSH catches near-duplicates at 0.12ms before they enter the system. No more redundant memories.
+4. **Auto-deduplication** — MinHash LSH catches near-duplicates before they enter
+   the store, and the index is rebuilt from the database on open so it survives
+   restarts.
 
-5. **Knowledge Graph** — Entities and typed relationships with multi-hop BFS traversal. Find connections that vector search alone would miss.
+5. **Knowledge graph** — entities and typed relationships with multi-hop,
+   bidirectional traversal. Find connections vector search alone would miss.

@@ -20,3 +20,4 @@ docs/.vitepress/cache/
 htmlcov/
 *.log
 .DS_Store
+.vercel

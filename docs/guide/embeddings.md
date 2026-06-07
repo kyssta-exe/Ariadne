@@ -6,6 +6,35 @@ description: "Use any embedding model with Ariadne. Recommended: sentence-transf
 
 Ariadne is model-agnostic — any embedding model that produces a fixed-dimensional vector works. Here's how to choose, configure, and use embeddings.
 
+## Automatic embedding (recommended)
+
+Pass an `embedder` to `AriadneMemory` and it embeds text for you: `remember()`
+embeds content and `recall()` embeds the query, so you get semantic + hybrid
+search without managing vectors by hand.
+
+```bash
+pip install "arriadne[embeddings]"
+```
+
+```python
+from arriadne import AriadneMemory
+from arriadne.embeddings import SentenceTransformerEmbedder
+
+embedder = SentenceTransformerEmbedder("all-MiniLM-L6-v2")  # 384-dim
+
+mem = AriadneMemory(db_path="memory.db", embedding_dim=embedder.dim, embedder=embedder)
+
+mem.remember("User prefers dark mode in all applications", importance=0.8)
+results = mem.recall("what are the user's UI preferences?", k=5)  # embedded automatically
+```
+
+`embedder` accepts a `SentenceTransformerEmbedder`, any callable
+`str -> list[float]` that exposes a `.dim` attribute, or a model-name string.
+Ariadne checks `embedder.dim` against `embedding_dim` and raises if they differ.
+
+The rest of this guide covers picking a model and the manual path (passing
+vectors yourself), which is still fully supported.
+
 ## Recommended Models
 
 | Model | Dimensions | Speed | Quality | Best For |
@@ -185,8 +214,8 @@ from arriadne import AriadneConfig
 config = AriadneConfig(
     embedding_dim=384,          # Must match your model's output dimension
     faiss_type="auto",          # Auto-select FlatIP/IVFFlat
-    ivf_threshold=1000,         # Upgrade to IVFFlat at this count
-    ivf_nlist=256,              # Voronoi cells for IVFFlat
+    ivf_threshold=50_000,       # auto: upgrade to IVFFlat at this count
+    ivf_nlist=128,              # Voronoi cells (effective nlist = min(ivf_nlist, sqrt(n)))
 )
 ```
 

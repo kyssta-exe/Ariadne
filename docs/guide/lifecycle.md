@@ -15,15 +15,17 @@ $$R = e^{-t/S}$$
 Where:
 - **R** = Retention strength (0.0 to 1.0)
 - **t** = Time since last access (seconds)
-- **S** = Stability, derived from `retention_half_life × importance`
+- **S** = Stability = `retention_half_life × importance × retention_strength`
+  (`retention_strength` starts at 1.0 and grows on each access — see below)
 
 ### How It Works
 
 ```python
 import math
 
-# For a memory with importance=0.8 and default half_life=86400 (1 day):
-# S = 86400 * 0.8 = 69120 seconds
+# For a fresh memory with importance=0.8, default half_life=86400 (1 day),
+# and retention_strength=1.0:
+# S = 86400 * 0.8 * 1.0 = 69120 seconds
 
 # Immediately after access (t=0):
 R = math.exp(0)  # 1.0 — perfect retention
@@ -56,23 +58,39 @@ print(f"Retention: {retention:.4f}")  # e.g., 0.2873
 
 ## Stability Growth
 
-Each time a memory is accessed, its **retention strength grows by 1.5x**. This models the spacing effect — memories recalled at expanding intervals are retained longer.
+Each time a memory is **accessed**, its stored `retention_strength` is multiplied
+by `retention_growth_factor` (default **1.5**) and capped at
+`retention_strength_cap` (default **100.0**). This feeds directly into the
+stability term above, so frequently recalled memories decay more slowly — the
+spacing effect.
 
 ```
-Initial access:    S = 1.0
-After 1st recall:  S = 1.5
-After 2nd recall:  S = 2.25
-After 3rd recall:  S = 3.375
-After nth recall:  S = 1.0 × 1.5^n
+Fresh:            retention_strength = 1.0
+After 1st access: retention_strength = 1.5
+After 2nd access: retention_strength = 2.25
+After 3rd access: retention_strength = 3.375
+After nth access: retention_strength = min(cap, 1.5^n)
 ```
 
-Access tracking happens automatically via the `access_log` table:
+### What counts as an access
+
+Access tracking is explicit and batched — `get_memory()` is a **pure read** and
+does not mutate anything. An access is recorded when:
+
+- `recall()` surfaces a memory (it touches the returned top-k in one write), or
+- you call `touch_memory(id)` / `touch_memories(ids)` directly.
+
+A single `touch` increments `access_count`, refreshes `accessed_at`, grows
+`retention_strength`, and logs one row to `access_log` (via a trigger).
 
 ```python
-# Each recall() or get_memory() call:
-# 1. Increments access_count
-# 2. Updates accessed_at timestamp
-# 3. Logs to access_log table
+from arriadne import AriadneConfig
+
+# Tune the growth curve
+config = AriadneConfig(
+    retention_growth_factor=1.5,   # multiplier per access (>= 1.0)
+    retention_strength_cap=100.0,  # ceiling
+)
 ```
 
 ## Priority Scoring
@@ -140,9 +158,11 @@ mem.forget(memory_id=42, hard=True)
 
 Soft-deleted memories:
 - Are excluded from search results
-- Keep their FAISS vectors (for index consistency)
-- Can be recovered by updating `is_deleted = 0`
-- Never evict high-importance memories (> 0.9)
+- Keep their row (and embedding) in the database, so they can be recovered by
+  setting `is_deleted = 0`
+- Have their vector dropped from the live FAISS index, and are pruned entirely on
+  the next open (the index is rebuilt from active memories only)
+- Can be permanently removed with `purge_deleted()`
 
 ### Configuring Eviction
 
@@ -177,10 +197,15 @@ Consolidation groups similar memories and creates merged summaries, reducing red
 
 1. Load up to 5,000 active memories
 2. Tokenize each memory's content into word sets
-3. Compute **Jaccard similarity** between all pairs
-4. Group memories with similarity ≥ `consolidation_threshold` (default: 0.7)
-5. Create consolidation records with merged content and averaged importance
-6. Minimum group size: `consolidation_min_group` (default: 2)
+3. Compute **Jaccard similarity** between pairs
+4. Group memories with similarity ≥ `consolidation_threshold` (default: 0.7),
+   minimum group size `consolidation_min_group` (default: 2)
+5. For each group, create one **merged memory**: content joined by ` | `,
+   importance = the group's max, and a mean-pooled embedding (so it stays
+   vector-searchable)
+6. **Soft-delete the originals** and link them to the merged memory via
+   `memory_links` (`link_type='consolidated'`); record the group in the
+   `consolidations` table
 
 ### Jaccard Similarity
 
@@ -220,13 +245,15 @@ print(f"Active memories: {stats['active_memories']}")
 print(f"Deleted memories: {stats['deleted_memories']}")
 print(f"Consolidations: {stats['total_consolidations']}")
 
-# Manual maintenance cycle
-def full_maintenance():
-    """Run complete lifecycle maintenance."""
-    evicted = mem.evict()
-    consolidated = mem.consolidate()
-    stats = mem.stats()
-    print(f"Maintained: evicted={evicted}, consolidated={consolidated}")
-    print(f"Active: {stats['active_memories']}, total: {stats['total_memories']}")
+# One call runs the whole housekeeping cycle:
+# consolidate -> evict -> prune access log -> purge soft-deleted
+summary = mem.maintenance()
+# {"consolidated": 2, "evicted": 5, "access_log_pruned": 40, "purged": 3}
+
+# Or run the steps individually:
+mem.consolidate()
+mem.evict()
+mem.prune_access_log()                         # bound access_log growth
+mem.purge_deleted(older_than_seconds=86400)    # hard-remove old soft-deletes
 ```
 

@@ -1,7 +1,7 @@
 """Ariadne Memory Provider for Hermes.
 
-Drop-in replacement for Mnemosyne. Implements the MemoryProvider interface
-with Ariadne (FAISS + FTS5 + Knowledge Graph) as the backend.
+Implements the Hermes MemoryProvider interface with Ariadne (FAISS + FTS5 +
+Knowledge Graph) as the backend. Exposes ``ariadne_*`` memory tools.
 
 Installation:
     1. Place this directory in ~/.hermes/plugins/ariadne/
@@ -118,7 +118,7 @@ class AriadneMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         """Return static system prompt block for Ariadne."""
-        return ""  # Mnemosyne also returns "" — per Hermes convention
+        return ""  # No static block; memories are injected per-turn via prefetch()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Recall relevant memories before each turn."""
@@ -201,7 +201,7 @@ class AriadneMemoryProvider(MemoryProvider):
         """Return all memory tool schemas."""
         return [
             {
-                "name": "mnemosyne_remember",
+                "name": "ariadne_remember",
                 "description": "Store a durable memory in Ariadne. Use for ANY fact, preference, identity, insight, or context that should persist across sessions.",
                 "parameters": {
                     "type": "object",
@@ -216,7 +216,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_recall",
+                "name": "ariadne_recall",
                 "description": "Search Ariadne for relevant memories. Hybrid ranking: FTS5 text + FAISS vector.",
                 "parameters": {
                     "type": "object",
@@ -228,12 +228,12 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_stats",
+                "name": "ariadne_stats",
                 "description": "Return Ariadne memory statistics.",
                 "parameters": {"type": "object", "properties": {}},
             },
             {
-                "name": "mnemosyne_forget",
+                "name": "ariadne_forget",
                 "description": "Permanently delete a memory by ID.",
                 "parameters": {
                     "type": "object",
@@ -244,7 +244,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_update",
+                "name": "ariadne_update",
                 "description": "Update the content or importance of an existing memory by ID.",
                 "parameters": {
                     "type": "object",
@@ -257,7 +257,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_invalidate",
+                "name": "ariadne_invalidate",
                 "description": "Soft-delete a memory (mark as superseded).",
                 "parameters": {
                     "type": "object",
@@ -268,7 +268,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_export",
+                "name": "ariadne_export",
                 "description": "Export all Ariadne memories to a JSON file.",
                 "parameters": {
                     "type": "object",
@@ -279,7 +279,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_import",
+                "name": "ariadne_import",
                 "description": "Import memories from a JSON file.",
                 "parameters": {
                     "type": "object",
@@ -290,12 +290,12 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_diagnose",
+                "name": "ariadne_diagnose",
                 "description": "Run diagnostics on the Ariadne installation.",
                 "parameters": {"type": "object", "properties": {}},
             },
             {
-                "name": "mnemosyne_graph_query",
+                "name": "ariadne_graph_query",
                 "description": "Traverse the memory graph from a seed entity.",
                 "parameters": {
                     "type": "object",
@@ -307,7 +307,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_graph_link",
+                "name": "ariadne_graph_link",
                 "description": "Declare a relationship between two entities.",
                 "parameters": {
                     "type": "object",
@@ -321,7 +321,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_sleep",
+                "name": "ariadne_sleep",
                 "description": "Run the Ariadne memory consolidation cycle. Compresses old working memories into summaries.",
                 "parameters": {
                     "type": "object",
@@ -331,7 +331,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_scratchpad_write",
+                "name": "ariadne_scratchpad_write",
                 "description": "Write a temporary note to the scratchpad.",
                 "parameters": {
                     "type": "object",
@@ -342,17 +342,17 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_scratchpad_read",
+                "name": "ariadne_scratchpad_read",
                 "description": "Read the scratchpad entries.",
                 "parameters": {"type": "object", "properties": {}},
             },
             {
-                "name": "mnemosyne_scratchpad_clear",
+                "name": "ariadne_scratchpad_clear",
                 "description": "Clear all scratchpad entries.",
                 "parameters": {"type": "object", "properties": {}},
             },
             {
-                "name": "mnemosyne_shared_remember",
+                "name": "ariadne_shared_remember",
                 "description": "Store a memory in the shared surface DB (cross-agent).",
                 "parameters": {
                     "type": "object",
@@ -365,7 +365,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_shared_recall",
+                "name": "ariadne_shared_recall",
                 "description": "Search the shared surface DB.",
                 "parameters": {
                     "type": "object",
@@ -377,7 +377,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_shared_forget",
+                "name": "ariadne_shared_forget",
                 "description": "Delete a shared surface memory.",
                 "parameters": {
                     "type": "object",
@@ -388,7 +388,7 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
-                "name": "mnemosyne_shared_stats",
+                "name": "ariadne_shared_stats",
                 "description": "Return shared surface DB stats.",
                 "parameters": {"type": "object", "properties": {}},
             },
@@ -402,25 +402,25 @@ class AriadneMemoryProvider(MemoryProvider):
             return json.dumps({"error": "Ariadne not initialized"})
 
         handlers = {
-            "mnemosyne_remember": self._handle_remember,
-            "mnemosyne_recall": self._handle_recall,
-            "mnemosyne_stats": self._handle_stats,
-            "mnemosyne_forget": self._handle_forget,
-            "mnemosyne_update": self._handle_update,
-            "mnemosyne_invalidate": self._handle_invalidate,
-            "mnemosyne_export": self._handle_export,
-            "mnemosyne_import": self._handle_import,
-            "mnemosyne_diagnose": self._handle_diagnose,
-            "mnemosyne_graph_query": self._handle_graph_query,
-            "mnemosyne_graph_link": self._handle_graph_link,
-            "mnemosyne_sleep": self._handle_sleep,
-            "mnemosyne_scratchpad_write": self._handle_scratchpad_write,
-            "mnemosyne_scratchpad_read": self._handle_scratchpad_read,
-            "mnemosyne_scratchpad_clear": self._handle_scratchpad_clear,
-            "mnemosyne_shared_remember": self._handle_shared_remember,
-            "mnemosyne_shared_recall": self._handle_shared_recall,
-            "mnemosyne_shared_forget": self._handle_shared_forget,
-            "mnemosyne_shared_stats": self._handle_shared_stats,
+            "ariadne_remember": self._handle_remember,
+            "ariadne_recall": self._handle_recall,
+            "ariadne_stats": self._handle_stats,
+            "ariadne_forget": self._handle_forget,
+            "ariadne_update": self._handle_update,
+            "ariadne_invalidate": self._handle_invalidate,
+            "ariadne_export": self._handle_export,
+            "ariadne_import": self._handle_import,
+            "ariadne_diagnose": self._handle_diagnose,
+            "ariadne_graph_query": self._handle_graph_query,
+            "ariadne_graph_link": self._handle_graph_link,
+            "ariadne_sleep": self._handle_sleep,
+            "ariadne_scratchpad_write": self._handle_scratchpad_write,
+            "ariadne_scratchpad_read": self._handle_scratchpad_read,
+            "ariadne_scratchpad_clear": self._handle_scratchpad_clear,
+            "ariadne_shared_remember": self._handle_shared_remember,
+            "ariadne_shared_recall": self._handle_shared_recall,
+            "ariadne_shared_forget": self._handle_shared_forget,
+            "ariadne_shared_stats": self._handle_shared_stats,
         }
 
         handler = handlers.get(tool_name)
