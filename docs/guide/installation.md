@@ -1,13 +1,13 @@
 ---
 title: "Installation — Ariadne"
-description: "Install Ariadne with pip install ariadne. No system packages, no Docker, no external services. Python 3.10+ required."
+description: "Install Ariadne with pip install ariadne-memory. No system packages, no Docker, no external services. Python 3.10+ required."
 ---
 
 
 ## From PyPI
 
 ```bash
-pip install ariadne
+pip install ariadne-memory
 ```
 
 That's the only step. `faiss-cpu`, `numpy`, and `datasketch` install automatically as dependencies. No system packages, no Docker, no external services.

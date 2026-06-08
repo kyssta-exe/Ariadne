@@ -8,10 +8,10 @@ Ariadne provides a command-line interface for common operations without writing 
 
 ## Installation
 
-The CLI is installed automatically with the `ariadne` package:
+The CLI is installed automatically with the `ariadne-memory` package:
 
 ```bash
-pip install ariadne
+pip install ariadne-memory
 ```
 
 Or run directly:

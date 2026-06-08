@@ -16,7 +16,7 @@ Paste this entire block into Hermes as a single message. It contains everything 
 Replace my memory provider with Ariadne. Here's everything you need:
 
 ARIADNE
-- PyPI: https://pypi.org/project/arriadne/
+- PyPI: https://pypi.org/project/ariadne-memory/
 - GitHub: https://github.com/kyssta-exe/Ariadne
 - Docs: https://ariadne.mantes.net
 - Plugin: https://github.com/kyssta-exe/Ariadne/tree/main/plugin

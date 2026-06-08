@@ -9,7 +9,7 @@ Get Ariadne running in under 60 seconds.
 ## Install
 
 ```bash
-pip install ariadne sentence-transformers
+pip install ariadne-memory sentence-transformers
 ```
 
 ## Store, Search, Connect
