@@ -68,7 +68,7 @@ results = mem.recall("server specs", k=5)
 <div class="hero-install">
 
 ```bash
-pip install "arriadne[embeddings]"
+pip install "ariadne-memory[embeddings]"
 ```
 
 </div>

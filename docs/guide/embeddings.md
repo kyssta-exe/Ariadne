@@ -13,7 +13,7 @@ embeds content and `recall()` embeds the query, so you get semantic + hybrid
 search without managing vectors by hand.
 
 ```bash
-pip install "arriadne[embeddings]"
+pip install "ariadne-memory[embeddings]"
 ```
 
 ```python

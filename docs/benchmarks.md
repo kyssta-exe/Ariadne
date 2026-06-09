@@ -24,7 +24,7 @@ figures you see quoted elsewhere as illustrative, not guaranteed.
 ## Harness
 
 ```bash
-pip install "arriadne[embeddings]" numpy
+pip install "ariadne-memory[embeddings]" numpy
 ```
 
 ```python

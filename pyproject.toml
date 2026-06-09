@@ -70,6 +70,11 @@ python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+exclude = ["src/arriadne/dashboard/"]
+
+[[tool.mypy.overrides]]
+module = ["datasketch.*", "numpy.*", "faiss.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py310"

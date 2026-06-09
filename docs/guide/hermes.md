@@ -25,7 +25,7 @@ WHAT IT IS
 Ariadne is a local memory system for AI agents. It uses FAISS for vector search, FTS5 for keywords, Reciprocal Rank Fusion to combine both, a knowledge graph with typed edges and multi-hop traversal, MinHash LSH deduplication, and an Ebbinghaus forgetting curve for retention. No cloud, no daemon, no API keys.
 
 INSTALL
-1. Install the Python package: pip install arriadne
+1. Install the Python package: pip install ariadne-memory
 2. Download the plugin files from https://github.com/kyssta-exe/Ariadne/tree/main/plugin and save them to ~/.hermes/plugins/ariadne/__init__.py and ~/.hermes/plugins/ariadne/plugin.yaml
    (Or clone the repo and copy: git clone https://github.com/kyssta-exe/Ariadne.git /tmp/ariadne && cp -r /tmp/ariadne/plugin ~/.hermes/plugins/ariadne)
 3. Set the provider: hermes config set memory.provider ariadne
@@ -54,7 +54,7 @@ Step-by-step if you prefer to do it yourself.
 ### Step 1 — Install the Python package
 
 ```bash
-pip install arriadne
+pip install ariadne-memory
 ```
 
 ### Step 2 — Download the plugin
