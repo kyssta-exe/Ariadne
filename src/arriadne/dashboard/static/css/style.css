@@ -1256,6 +1256,11 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ── Beta Badge ─────────────────────────────────────── */
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .beta-badge {
   display: inline-flex;
   align-items: center;
