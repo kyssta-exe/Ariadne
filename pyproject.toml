@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arriadne"
-version = "0.1.2"
+version = "0.9.0"
 description = "AI agent memory system — sub-millisecond hybrid search (FAISS vector + FTS5 keyword + RRF fusion), knowledge graph traversal, cognitive retention modeling, and auto-deduplication. Zero infrastructure."
 readme = "README.md"
 license = "MIT"
@@ -34,6 +34,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dashboard = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+]
 embeddings = [
     "sentence-transformers>=2.2.0",
 ]
@@ -42,6 +46,8 @@ dev = [
     "pytest-cov>=4.0.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
 ]
 
 [project.scripts]

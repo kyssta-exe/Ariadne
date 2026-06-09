@@ -256,6 +256,106 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export all memories as JSON."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        data = mem.export_json()
+        output = args.output
+        if output:
+            import json
+            with open(output, 'w') as f:
+                json.dump(data, f, indent=2)
+            print(f"Exported {len(data.get('memories', []))} memories to {output}")
+        else:
+            import json
+            print(json.dumps(data, indent=2))
+        mem.close()
+        return 0
+    except Exception as e:
+        print(f"Error exporting: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Import memories from JSON file."""
+    try:
+        import json
+        with open(args.source, 'r') as f:
+            data = json.load(f)
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        count = mem.import_json(data)
+        mem.close()
+        print(f"Imported {count} memories from {args.source}")
+        return 0
+    except Exception as e:
+        print(f"Error importing: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_maintain(args: argparse.Namespace) -> int:
+    """Run scheduled maintenance (consolidate + evict + prune)."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        result = mem.maintenance()
+        print(f"Maintenance complete: consolidated={result.get('consolidated', 0)}, "
+              f"evicted={result.get('evicted', 0)}, "
+              f"pruned={result.get('access_log_pruned', 0)}, "
+              f"purged={result.get('purged', 0)}")
+        mem.close()
+        return 0
+    except Exception as e:
+        print(f"Error during maintenance: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Launch the Ariadne web dashboard.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    try:
+        import uvicorn  # noqa: F401  — lazy import
+    except ImportError:
+        print(
+            "uvicorn is required for the dashboard.  "
+            "Install it with:  pip install 'arriadne[dashboard]'",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        from arriadne.dashboard.server import create_app
+    except ImportError as e:
+        print(f"Dashboard module not available: {e}", file=sys.stderr)
+        return 1
+
+    app = create_app(db_path=args.db_path)
+
+    # Auto-open browser unless --no-browser
+    if not args.no_browser:
+        import threading
+        import webbrowser
+
+        def _open() -> None:
+            import time as _time
+            _time.sleep(1.0)
+            webbrowser.open(f"http://{args.host}:{args.port}")
+
+        threading.Thread(target=_open, daemon=True).start()
+
+    print(f"Ariadne Dashboard running at http://{args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main CLI entry point.
 
@@ -308,6 +408,23 @@ def main(argv: list[str] | None = None) -> int:
     migrate_parser = subparsers.add_parser("migrate", help="Import from Mnemosyne JSON")
     migrate_parser.add_argument("source", help="Path to Mnemosyne JSON export")
 
+    # export
+    export_parser = subparsers.add_parser("export", help="Export memories as JSON")
+    export_parser.add_argument("-o", "--output", help="Output file (default: stdout)")
+
+    # import
+    import_parser = subparsers.add_parser("import", help="Import memories from JSON")
+    import_parser.add_argument("source", help="Path to JSON export file")
+
+    # maintain
+    maintain_parser = subparsers.add_parser("maintain", help="Run maintenance (consolidate + evict + prune)")
+
+    # dashboard
+    dash_parser = subparsers.add_parser("dashboard", help="Launch web dashboard")
+    dash_parser.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
+    dash_parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    dash_parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -327,6 +444,14 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_stats(args)
         case "migrate":
             return cmd_migrate(args)
+        case "export":
+            return cmd_export(args)
+        case "import":
+            return cmd_import(args)
+        case "maintain":
+            return cmd_maintain(args)
+        case "dashboard":
+            return cmd_dashboard(args)
         case _:
             parser.print_help()
             return 1

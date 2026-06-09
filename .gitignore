@@ -13,6 +13,8 @@ node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 *.db
+*.db-shm
+*.db-wal
 *.faiss
 *.faiss.*
 .pytest_cache/

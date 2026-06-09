@@ -117,6 +117,7 @@ class AriadneMemory:
         embedding: list[float] | np.ndarray | None = None,
         entities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Remember something by storing it in memory.
 
@@ -163,14 +164,22 @@ class AriadneMemory:
                 if embedding is not None:
                     emb_array = np.asarray(embedding, dtype=np.float32)
 
+                # Canonicalize entities to prevent fragmentation (e.g., "Mailcow" vs "mailcow")
+                canonical_entities = None
+                if entities:
+                    canonical_entities = list({
+                        e.strip().lower() for e in entities if isinstance(e, str) and e.strip()
+                    })
+
                 # Add to storage
                 storage_result = self._db.add_memory(
                     content=content,
                     embedding=emb_array,
                     memory_type=memory_type,
                     importance=importance,
-                    entities=entities,
+                    entities=canonical_entities,
                     metadata=metadata,
+                    tags=tags,
                 )
 
                 memory_id = storage_result["memory_id"]
@@ -320,6 +329,7 @@ class AriadneMemory:
         importance: float | None = None,
         embedding: list[float] | np.ndarray | None = None,
         metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
     ) -> bool:
         """Update an existing memory.
 
@@ -341,8 +351,11 @@ class AriadneMemory:
                     embedding = self._embedder(content)
 
                 emb_array = None
+                # Auto-re-embed if content changed and no embedding provided
                 if embedding is not None:
                     emb_array = np.asarray(embedding, dtype=np.float32)
+                elif content is not None and self._embedder is not None:
+                    emb_array = np.asarray(self._embedder(content), dtype=np.float32)
 
                 result = self._db.update_memory(
                     memory_id,
@@ -350,6 +363,7 @@ class AriadneMemory:
                     importance=importance,
                     embedding=emb_array,
                     metadata=metadata,
+                    tags=tags,
                 )
 
                 # Update dedup index if content changed
@@ -471,3 +485,67 @@ class AriadneMemory:
             "access_log_pruned": pruned,
             "purged": purged,
         }
+
+    # Auto-maintenance: call every N writes to keep things tidy
+    _write_count: int = 0
+    _maintenance_interval: int = 50
+
+    def _maybe_maintain(self) -> None:
+        """Trigger maintenance every _maintenance_interval writes."""
+        AriadneMemory._write_count += 1
+        if AriadneMemory._write_count >= self._maintenance_interval:
+            AriadneMemory._write_count = 0
+            try:
+                self.maintenance()
+                logger.info("Auto-maintenance completed")
+            except Exception as e:
+                logger.warning("Auto-maintenance failed: %s", e)
+
+    def remember_many(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Add multiple memories efficiently in a single transaction.
+
+        Each item supports: content, memory_type, importance, entities, metadata, tags.
+
+        Returns:
+            List of result dicts per item.
+        """
+        with self._lock:
+            # Batch-embed if embedder is configured
+            if self._embedder is not None:
+                texts = [item.get("content", "") for item in items]
+                embeddings = self._embedder(texts)  # batch embed
+                for i, item in enumerate(items):
+                    if i < len(embeddings) and "embedding" not in item:
+                        item["embedding"] = embeddings[i]
+
+            results = self._db.add_memories_bulk(items)
+
+            # Update dedup index for created memories
+            for res in results:
+                if res["status"] == "created":
+                    mid = res["memory_id"]
+                    for item in items:
+                        if item.get("content"):
+                            self._dedup.add(item["content"], doc_id=str(mid))
+                            break
+
+            self._maybe_maintain()
+            return results
+
+    def export_json(self) -> dict[str, Any]:
+        """Export all memories, entities, and links as JSON-safe dict."""
+        return self._db.export_all()
+
+    def import_json(self, data: dict[str, Any]) -> int:
+        """Import from a previously exported JSON dict. Returns count imported."""
+        count = self._db.import_all(data)
+        # Rebuild dedup index
+        self._dedup = Deduplicator(
+            threshold=self._config.dedup_threshold,
+            num_perm=self._config.dedup_num_perm,
+        )
+        self._load_dedup_from_db()
+        return count

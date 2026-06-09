@@ -236,7 +236,8 @@ class AriadneDB:
                 retention_strength REAL NOT NULL DEFAULT 1.0,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at REAL,
-                metadata TEXT
+                metadata TEXT,
+                tags TEXT DEFAULT '[]'
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_content_hash
@@ -356,6 +357,13 @@ class AriadneDB:
             END;
         """)
 
+        # Migration: add tags column for existing databases
+        cursor.execute("PRAGMA table_info(memories)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "tags" not in cols:
+            cursor.execute("ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT '[]'")
+            logger.info("Added 'tags' column to memories table (migration)")
+
         self._commit()
         logger.debug("Schema created/verified")
 
@@ -473,6 +481,7 @@ class AriadneDB:
         importance: float = 0.5,
         entities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Add a new memory to the database.
 
@@ -510,15 +519,16 @@ class AriadneDB:
                 embedding_blob = emb.tobytes()
 
             metadata_json = json.dumps(metadata) if metadata is not None else None
+            tags_json = json.dumps(tags) if tags else '[]'
 
             cursor = self._conn.execute(
                 """INSERT INTO memories
                    (content, content_hash, memory_type, importance, embedding,
                     created_at, updated_at, accessed_at, access_count,
-                    retention_strength, is_deleted, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?)""",
+                    retention_strength, is_deleted, metadata, tags)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?)""",
                 (content, content_hash, memory_type, importance, embedding_blob,
-                 now, now, now, metadata_json),
+                 now, now, now, metadata_json, tags_json),
             )
             memory_id = cursor.lastrowid
             assert memory_id is not None
@@ -551,6 +561,198 @@ class AriadneDB:
             raise
         except Exception as e:
             logger.error("Unexpected error adding memory: %s", e)
+            raise
+
+    @_synchronized
+    def add_memories_bulk(
+        self,
+        memories: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Add multiple memories in a single transaction.
+
+        Each memory dict supports: content, embedding, memory_type,
+        importance, entities, metadata, tags.
+
+        Returns:
+            List of result dicts with memory_id and status per memory.
+        """
+        assert self._conn is not None
+        results = []
+        now = _now()
+        try:
+            for mem in memories:
+                content = mem.get("content", "")
+                importance = _clamp01(mem.get("importance", 0.5))
+                content_hash = _hash_content(content)
+                memory_type = mem.get("memory_type", "semantic")
+
+                # Dedup check
+                cursor = self._conn.execute(
+                    "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
+                    (content_hash,),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    results.append({"memory_id": existing[0], "status": "duplicate"})
+                    continue
+
+                emb = None
+                embedding_blob = None
+                embedding = mem.get("embedding")
+                if embedding is not None:
+                    emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                    embedding_blob = emb.tobytes()
+
+                metadata_json = json.dumps(mem.get("metadata")) if mem.get("metadata") else None
+                tags_json = json.dumps(mem.get("tags")) if mem.get("tags") else "[]"
+
+                cursor = self._conn.execute(
+                    """INSERT INTO memories
+                       (content, content_hash, memory_type, importance, embedding,
+                        created_at, updated_at, accessed_at, access_count,
+                        retention_strength, is_deleted, metadata, tags)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?)""",
+                    (content, content_hash, memory_type, importance, embedding_blob,
+                     now, now, now, metadata_json, tags_json),
+                )
+                memory_id = cursor.lastrowid
+                assert memory_id is not None
+                memory_id = int(memory_id)
+
+                # Add to FAISS
+                if emb is not None:
+                    vec = np.ascontiguousarray(emb.reshape(1, -1), dtype=np.float32)
+                    self._faiss_index.add_with_ids(vec, np.asarray([memory_id], dtype=np.int64))
+                    self._maybe_upgrade_faiss_index()
+
+                # Associate entities
+                entities = mem.get("entities")
+                if entities:
+                    for entity_name in entities:
+                        entity_id = self._get_or_create_entity(entity_name)
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                            (memory_id, entity_id),
+                        )
+
+                results.append({"memory_id": memory_id, "status": "created"})
+
+            self._commit()
+            logger.info("Bulk add: %d memories, %d created, %d duplicates",
+                        len(memories),
+                        sum(1 for r in results if r["status"] == "created"),
+                        sum(1 for r in results if r["status"] == "duplicate"))
+            return results
+        except sqlite3.Error as e:
+            logger.error("Database error in bulk add: %s", e)
+            raise
+
+    def export_all(self) -> dict[str, Any]:
+        """Export all active memories, entities, and links as a JSON-safe dict."""
+        assert self._conn is not None
+        memories = []
+        for row in self._conn.execute(
+            """SELECT id, content, content_hash, memory_type, importance,
+                      created_at, updated_at, accessed_at, access_count,
+                      retention_strength, metadata, tags
+               FROM memories WHERE is_deleted = 0 ORDER BY id"""
+        ).fetchall():
+            mem = {
+                "id": row[0],
+                "content": row[1],
+                "content_hash": row[2],
+                "memory_type": row[3],
+                "importance": row[4],
+                "created_at": row[5],
+                "updated_at": row[6],
+                "accessed_at": row[7],
+                "access_count": row[8],
+                "retention_strength": row[9],
+                "metadata": json.loads(row[10]) if row[10] else None,
+                "tags": json.loads(row[11]) if row[11] else [],
+            }
+            # Get entities for this memory
+            entity_rows = self._conn.execute(
+                """SELECT e.name FROM memory_entities me
+                   JOIN entities e ON e.id = me.entity_id
+                   WHERE me.memory_id = ?""",
+                (mem["id"],),
+            ).fetchall()
+            mem["entities"] = [r[0] for r in entity_rows]
+            memories.append(mem)
+
+        entities = [{"id": r[0], "name": r[1], "entity_type": r[2], "created_at": r[3]}
+                    for r in self._conn.execute(
+                        "SELECT id, name, entity_type, created_at FROM entities"
+                    ).fetchall()]
+
+        memory_links = [{"source_id": r[0], "target_id": r[1], "link_type": r[2], "strength": r[3], "created_at": r[4]}
+                        for r in self._conn.execute(
+                            "SELECT source_id, target_id, link_type, strength, created_at FROM memory_links"
+                        ).fetchall()]
+
+        return {"version": 1, "memories": memories, "entities": entities, "memory_links": memory_links}
+
+    def import_all(self, data: dict[str, Any]) -> int:
+        """Import memories from an export dict. Returns count imported."""
+        assert self._conn is not None
+        count = 0
+        now = _now()
+        try:
+            for mem in data.get("memories", []):
+                content = mem.get("content", "")
+                content_hash = _hash_content(content)
+                cursor = self._conn.execute(
+                    "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
+                    (content_hash,),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    continue  # skip duplicates
+
+                metadata_json = json.dumps(mem.get("metadata")) if mem.get("metadata") else None
+                tags_json = json.dumps(mem.get("tags", []))
+                importance = _clamp01(mem.get("importance", 0.5))
+
+                cursor = self._conn.execute(
+                    """INSERT INTO memories
+                       (content, content_hash, memory_type, importance,
+                        created_at, updated_at, accessed_at, access_count,
+                        retention_strength, metadata, tags)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (content, content_hash,
+                     mem.get("memory_type", "semantic"), importance,
+                     mem.get("created_at", now), now,
+                     mem.get("accessed_at", now), mem.get("access_count", 0),
+                     mem.get("retention_strength", 1.0), metadata_json, tags_json),
+                )
+                memory_id = cursor.lastrowid
+                assert memory_id is not None
+                memory_id = int(memory_id)
+
+                # Re-associate entities (create if needed)
+                for entity_name in mem.get("entities", []):
+                    entity_id = self._get_or_create_entity(entity_name)
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                        (memory_id, entity_id),
+                    )
+                count += 1
+
+            # Re-import memory_links
+            for link in data.get("memory_links", []):
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO memory_links (source_id, target_id, link_type, strength, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (link["source_id"], link["target_id"], link.get("link_type", "related"),
+                     link.get("strength", 1.0), link.get("created_at", now)),
+                )
+
+            self._commit()
+            logger.info("Import: %d memories imported", count)
+            return count
+        except sqlite3.Error as e:
+            logger.error("Database error in import: %s", e)
             raise
 
     def _get_or_create_entity(self, name: str) -> int:
@@ -592,7 +794,7 @@ class AriadneDB:
             cursor = self._conn.execute(
                 """SELECT id, content, content_hash, memory_type, importance,
                           created_at, updated_at, accessed_at, access_count,
-                          retention_strength, is_deleted, metadata
+                          retention_strength, is_deleted, metadata, tags
                    FROM memories WHERE id = ?""",
                 (memory_id,),
             )
@@ -613,6 +815,7 @@ class AriadneDB:
                 "retention_strength": row[9],
                 "is_deleted": bool(row[10]),
                 "metadata": json.loads(row[11]) if row[11] else None,
+                "tags": json.loads(row[12]) if row[12] else [],
             }
         except sqlite3.Error as e:
             logger.error("Database error getting memory %d: %s", memory_id, e)
@@ -662,6 +865,7 @@ class AriadneDB:
         importance: float | None = None,
         embedding: np.ndarray | None = None,
         metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
     ) -> bool:
         """Update an existing memory.
 
@@ -697,6 +901,10 @@ class AriadneDB:
             if metadata is not None:
                 updates.append("metadata = ?")
                 params.append(json.dumps(metadata))
+
+            if tags is not None:
+                updates.append("tags = ?")
+                params.append(json.dumps(tags))
 
             emb: np.ndarray | None = None
             if embedding is not None:

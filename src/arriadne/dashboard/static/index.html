@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ariadne</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="/dashboard/static/css/style.css">
+</head>
+<body x-data="app()" x-init="init()" :class="{ 'sidebar-collapsed': !sidebarOpen }">
+
+  <!-- Auth Gate -->
+  <template x-if="!authenticated">
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-logo">
+          <svg width="48" height="48" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" style="color: #818cf8;">
+            <circle cx="256" cy="256" r="220" stroke="currentColor" stroke-width="16"/>
+            <circle cx="150" cy="180" r="18" fill="currentColor"/>
+            <circle cx="360" cy="140" r="18" fill="currentColor"/>
+            <circle cx="390" cy="310" r="18" fill="currentColor"/>
+            <circle cx="170" cy="350" r="18" fill="currentColor"/>
+            <circle cx="256" cy="256" r="26" fill="currentColor"/>
+            <path d="M150 180 Q210 120 360 140" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M360 140 Q420 220 390 310" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M390 310 Q310 390 170 350" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M170 350 Q110 260 150 180" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M150 180 Q180 220 220 235 Q240 245 256 256 Q280 270 320 260 Q350 250 390 310" stroke="currentColor" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h1>Ariadne</h1>
+        <p class="auth-subtitle">Memory system for AI agents</p>
+        <form @submit.prevent="login()">
+          <div class="field">
+            <label for="server-url">Server URL</label>
+            <input type="url" id="server-url" x-model="serverUrl" placeholder="http://localhost:8899" required autocomplete="url">
+          </div>
+          <div class="field">
+            <label for="api-key">API Key <span class="field-hint">(optional)</span></label>
+            <input type="password" id="api-key" x-model="apiKey" placeholder="ak_..." autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn btn-primary btn-full" :disabled="loading">
+            <span x-show="!loading">Connect</span>
+            <span x-show="loading" class="btn-loading">
+              <svg class="spinner" viewBox="0 0 20 20" width="16" height="16"><circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="40 60"/></svg>
+              Connecting…
+            </span>
+          </button>
+          <p class="auth-error" x-show="authError" x-text="authError"></p>
+        </form>
+        <p class="auth-hint">Leave API key blank for open access</p>
+      </div>
+    </div>
+  </template>
+
+  <!-- Main App -->
+  <template x-if="authenticated">
+    <div class="app-shell">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <svg width="24" height="24" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" style="color: #818cf8;">
+            <circle cx="256" cy="256" r="220" stroke="currentColor" stroke-width="16"/>
+            <circle cx="150" cy="180" r="18" fill="currentColor"/>
+            <circle cx="360" cy="140" r="18" fill="currentColor"/>
+            <circle cx="390" cy="310" r="18" fill="currentColor"/>
+            <circle cx="170" cy="350" r="18" fill="currentColor"/>
+            <circle cx="256" cy="256" r="26" fill="currentColor"/>
+            <path d="M150 180 Q210 120 360 140" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M360 140 Q420 220 390 310" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M390 310 Q310 390 170 350" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M170 350 Q110 260 150 180" stroke="currentColor" stroke-width="10" stroke-linecap="round"/>
+            <path d="M150 180 Q180 220 220 235 Q240 245 256 256 Q280 270 320 260 Q350 250 390 310" stroke="currentColor" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="brand-name" x-show="sidebarOpen">Ariadne</span>
+          <button class="sidebar-toggle" @click="sidebarOpen = !sidebarOpen" :title="sidebarOpen ? 'Collapse' : 'Expand'">
+            <i data-lucide="panel-left-close" x-show="sidebarOpen"></i>
+            <i data-lucide="panel-left-open" x-show="!sidebarOpen"></i>
+          </button>
+        </div>
+
+        <nav class="sidebar-nav">
+          <a class="nav-item" :class="{ active: page === 'dashboard' }" @click.prevent="page = 'dashboard'" href="#">
+            <i data-lucide="layout-dashboard"></i>
+            <span x-show="sidebarOpen">Dashboard</span>
+          </a>
+          <a class="nav-item" :class="{ active: page === 'memories' }" @click.prevent="page = 'memories'" href="#">
+            <i data-lucide="brain"></i>
+            <span x-show="sidebarOpen">Memories</span>
+          </a>
+          <a class="nav-item" :class="{ active: page === 'graph' }" @click.prevent="page = 'graph'" href="#">
+            <i data-lucide="git-branch"></i>
+            <span x-show="sidebarOpen">Graph</span>
+          </a>
+          <a class="nav-item" :class="{ active: page === 'search' }" @click.prevent="page = 'search'" href="#">
+            <i data-lucide="search"></i>
+            <span x-show="sidebarOpen">Search</span>
+          </a>
+          <a class="nav-item" :class="{ active: page === 'lifecycle' }" @click.prevent="page = 'lifecycle'" href="#">
+            <i data-lucide="refresh-cw"></i>
+            <span x-show="sidebarOpen">Lifecycle</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <nav class="sidebar-nav sidebar-bottom">
+          <a class="nav-item" :class="{ active: page === 'settings' }" @click.prevent="page = 'settings'" href="#">
+            <i data-lucide="settings"></i>
+            <span x-show="sidebarOpen">Settings</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-status" x-show="sidebarOpen">
+          <span class="status-dot" :class="healthStatus === 'ok' ? 'ok' : 'err'"></span>
+          <span class="status-text" x-text="stats.memories + ' memories'"></span>
+        </div>
+      </aside>
+
+      <!-- Content -->
+      <div class="content">
+        <!-- Topbar -->
+        <header class="topbar">
+          <div class="topbar-left">
+            <h1 class="page-title" x-text="pageTitle"></h1>
+            <span x-show="page === 'dashboard'" class="beta-badge">BETA</span>
+          </div>
+          <div class="topbar-right">
+            <div class="search-box">
+              <i data-lucide="search" class="search-icon"></i>
+              <input type="text" placeholder="Quick search…" x-model="quickSearch" @keyup.enter="performQuickSearch()" @keyup.escape="quickSearch = ''">
+              <kbd x-show="!quickSearch">/</kbd>
+            </div>
+            <div class="topbar-divider"></div>
+            <button class="btn btn-ghost btn-icon" @click="refresh()" title="Refresh data">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+            <button class="btn btn-ghost btn-icon" @click="logout()" title="Disconnect">
+              <i data-lucide="log-out"></i>
+            </button>
+          </div>
+        </header>
+
+        <!-- Page: Dashboard -->
+        <main class="page" x-show="page === 'dashboard'" x-transition:enter="page-enter" x-transition:leave="page-leave">
+          <div class="dashboard-layout">
+            <!-- Main column -->
+            <div class="dashboard-main">
+              <!-- System Snapshot -->
+              <div class="stat-row">
+                <div class="stat-card">
+                  <div class="stat-icon blue"><i data-lucide="brain"></i></div>
+                  <div class="stat-body">
+                    <div class="stat-value" x-text="formatNumber(stats.memories)"></div>
+                    <div class="stat-label">Memories</div>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-icon purple"><i data-lucide="network"></i></div>
+                  <div class="stat-body">
+                    <div class="stat-value" x-text="formatNumber(stats.entities)"></div>
+                    <div class="stat-label">Entities</div>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-icon green"><i data-lucide="git-merge"></i></div>
+                  <div class="stat-body">
+                    <div class="stat-value" x-text="formatNumber(stats.edges)"></div>
+                    <div class="stat-label">Edges</div>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-icon amber"><i data-lucide="database"></i></div>
+                  <div class="stat-body">
+                    <div class="stat-value" x-text="formatNumber(stats.faiss_vectors)"></div>
+                    <div class="stat-label">Vectors</div>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-icon pink"><i data-lucide="gauge"></i></div>
+                  <div class="stat-body">
+                    <div class="stat-value" x-text="stats.avg_importance ? stats.avg_importance.toFixed(2) : '0'"></div>
+                    <div class="stat-label">Avg Importance</div>
+                  </div>
+                </div>
+                <div class="stat-card">
+                  <div class="stat-icon" style="background: #1e293b; color: #94a3b8;"><i data-lucide="hard-drive"></i></div>
+                  <div class="stat-body">
+                    <div class="stat-value" x-text="stats.db_size ? (stats.db_size / 1024).toFixed(1) + 'KB' : '0KB'"></div>
+                    <div class="stat-label">DB Size</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Memory Composition + Link Types -->
+              <div class="grid-2">
+                <div class="panel">
+                  <div class="panel-header">
+                    <h3>Memory Composition</h3>
+                    <span class="toolbar-info" x-text="stats.memories + ' total'"></span>
+                  </div>
+                  <div class="panel-body">
+                    <div class="chart-wrap chart-wrap-sm">
+                      <canvas id="compositionChart"></canvas>
+                    </div>
+                  </div>
+                </div>
+                <div class="panel">
+                  <div class="panel-header">
+                    <h3>Link Types</h3>
+                    <span class="toolbar-info" x-text="stats.edges + ' total'"></span>
+                  </div>
+                  <div class="panel-body">
+                    <div id="linkTypesList" class="link-types-list"></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Activity Timeline -->
+              <div class="panel">
+                <div class="panel-header">
+                  <h3>Activity</h3>
+                  <div class="time-range-selector">
+                    <button class="time-btn" :class="{ active: timeRange === '1d' }" @click="setTimeRange('1d')">1D</button>
+                    <button class="time-btn" :class="{ active: timeRange === '7d' }" @click="setTimeRange('7d')">7D</button>
+                    <button class="time-btn" :class="{ active: timeRange === '30d' }" @click="setTimeRange('30d')">30D</button>
+                    <button class="time-btn" :class="{ active: timeRange === '90d' }" @click="setTimeRange('90d')">90D</button>
+                  </div>
+                </div>
+                <div class="panel-body chart-wrap">
+                  <canvas id="activityTimelineChart"></canvas>
+                </div>
+              </div>
+
+              <!-- Recent Activity Feed -->
+              <div class="panel">
+                <div class="panel-header">
+                  <h3>Recent Activity</h3>
+                </div>
+                <div class="panel-body">
+                  <div class="activity-list" x-show="activity.length > 0">
+                    <template x-for="item in activity" :key="item.id">
+                      <div class="activity-row">
+                        <span class="activity-dot" :class="'dot-' + (item.type || 'semantic')"></span>
+                        <span class="activity-text" x-text="item.text"></span>
+                        <span class="activity-time" x-text="item.time"></span>
+                      </div>
+                    </template>
+                  </div>
+                  <div class="empty" x-show="activity.length === 0">
+                    <i data-lucide="inbox"></i>
+                    <p>No recent activity</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right sidebar -->
+            <aside class="dashboard-sidebar">
+              <!-- Quick Actions -->
+              <div class="panel">
+                <div class="panel-header"><h3>Quick Actions</h3></div>
+                <div class="panel-body">
+                  <div class="quick-actions">
+                    <button class="btn btn-ghost btn-full" @click="page = 'memories'; showNewMemory = true">
+                      <i data-lucide="plus"></i> Create Memory
+                    </button>
+                    <button class="btn btn-ghost btn-full" @click="triggerConsolidation()" :disabled="loading">
+                      <i data-lucide="layers"></i> Run Consolidation
+                    </button>
+                    <button class="btn btn-ghost btn-full" @click="refresh()" :disabled="loading">
+                      <i data-lucide="refresh-cw"></i> Refresh Data
+                    </button>
+                    <button class="btn btn-ghost btn-full" @click="exportData()">
+                      <i data-lucide="download"></i> Export Data
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Recent Ingestion -->
+              <div class="panel">
+                <div class="panel-header"><h3>Recent Ingestion</h3></div>
+                <div class="panel-body">
+                  <div class="ingestion-list">
+                    <template x-for="mem in recentMemories" :key="mem.id">
+                      <div class="ingestion-item">
+                        <div class="ingestion-icon" :class="'type-' + (mem.memory_type || 'semantic')">
+                          <i data-lucide="brain"></i>
+                        </div>
+                        <div class="ingestion-body">
+                          <div class="ingestion-title" x-text="mem.content.substring(0, 40) + (mem.content.length > 40 ? '...' : '')"></div>
+                          <div class="ingestion-meta">
+                            <span class="badge badge-sm" x-text="mem.memory_type || 'semantic'"></span>
+                            <span x-text="timeAgo(mem.created_at)"></span>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                    <div class="empty empty-sm" x-show="recentMemories.length === 0">
+                      <p>No memories yet</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Memory Insight -->
+              <div class="panel insight-panel">
+                <div class="panel-body">
+                  <div class="insight-content">
+                    <div class="insight-icon"><i data-lucide="sparkles"></i></div>
+                    <p class="insight-text">Every memory is a thread. Together, they weave your knowledge graph.</p>
+                  </div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </main>
+
+        <!-- Page: Memories -->
+        <main class="page" x-show="page === 'memories'" x-transition:enter="page-enter" x-transition:leave="page-leave">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <div class="search-box search-box-wide">
+                <i data-lucide="search" class="search-icon"></i>
+                <input type="text" placeholder="Search memories…" x-model="memorySearch" @keyup.enter="searchMemories()">
+              </div>
+              <select class="select" x-model="memoryFilter.type">
+                <option value="">All types</option>
+                <option value="semantic">Semantic</option>
+                <option value="episodic">Episodic</option>
+                <option value="procedural">Procedural</option>
+              </select>
+              <select class="select" x-model="memoryFilter.tier">
+                <option value="">All tiers</option>
+                <option value="1">Hot</option>
+                <option value="2">Warm</option>
+                <option value="3">Cold</option>
+              </select>
+              <button class="btn btn-primary" @click="searchMemories()">
+                <i data-lucide="search"></i> Search
+              </button>
+            </div>
+            <button class="btn btn-brand" @click="showNewMemory = true">
+              <i data-lucide="plus"></i> New Memory
+            </button>
+          </div>
+
+          <div class="memory-grid">
+            <div class="memory-list">
+              <template x-for="mem in memories" :key="mem.id">
+                <div class="memory-card" @click="selectMemory(mem)" :class="{ selected: selectedMemory?.id === mem.id }">
+                  <div class="memory-card-top">
+                    <span class="tier-dot" :class="'tier-' + (mem.tier || mem.lifecycle_tier || 2)"></span>
+                    <span class="mem-id" x-text="'#' + mem.id"></span>
+                    <span class="badge" x-text="mem.memory_type || 'semantic'"></span>
+                    <span class="mem-stars">
+                      <template x-for="i in (mem.importance || 5)" :key="i">
+                        <span class="star filled">★</span>
+                      </template>
+                    </span>
+                  </div>
+                  <p class="memory-snippet" x-text="mem.content.substring(0, 150) + (mem.content?.length > 150 ? '…' : '')"></p>
+                  <div class="memory-card-bottom">
+                    <span class="mem-topic" x-text="mem.topic || 'general'"></span>
+                    <span class="mem-time" x-text="mem.age || ''"></span>
+                  </div>
+                </div>
+              </template>
+              <div class="empty" x-show="memories.length === 0 && !loading">
+                <i data-lucide="brain"></i>
+                <p>No memories found</p>
+              </div>
+            </div>
+
+            <!-- Detail Panel -->
+            <aside class="detail-panel" x-show="selectedMemory" :class="{ open: selectedMemory }" x-transition>
+              <div class="detail-head">
+                <h3 x-text="'Memory #' + (selectedMemory?.id || '')"></h3>
+                <button class="btn btn-ghost btn-icon btn-sm" @click="selectedMemory = null">
+                  <i data-lucide="x"></i>
+                </button>
+              </div>
+              <div class="detail-body">
+                <div class="detail-field">
+                  <span class="detail-key">Content</span>
+                  <p class="detail-value" x-text="selectedMemory?.content"></p>
+                </div>
+                <div class="detail-row">
+                  <div class="detail-field">
+                    <span class="detail-key">Type</span>
+                    <span class="badge" x-text="selectedMemory?.memory_type || 'semantic'"></span>
+                  </div>
+                  <div class="detail-field">
+                    <span class="detail-key">Topic</span>
+                    <span class="detail-value" x-text="selectedMemory?.topic || 'general'"></span>
+                  </div>
+                </div>
+                <div class="detail-row">
+                  <div class="detail-field">
+                    <span class="detail-key">Importance</span>
+                    <span class="detail-value" x-text="selectedMemory?.importance || 5"></span>
+                  </div>
+                  <div class="detail-field">
+                    <span class="detail-key">Tier</span>
+                    <span class="detail-value" x-text="['Hot','Warm','Cold'][(selectedMemory?.tier || 2) - 1] || 'Warm'"></span>
+                  </div>
+                </div>
+                <div class="detail-field" x-show="selectedMemory?.entities">
+                  <span class="detail-key">Entities</span>
+                  <div class="entity-chips">
+                    <template x-for="ent in (selectedMemory?.entities || [])" :key="ent">
+                      <span class="chip" x-text="ent"></span>
+                    </template>
+                  </div>
+                </div>
+                <div class="detail-field">
+                  <span class="detail-key">Raw</span>
+                  <pre class="detail-raw" x-text="JSON.stringify(selectedMemory, null, 2)"></pre>
+                </div>
+              </div>
+              <div class="detail-foot">
+                <button class="btn btn-danger" @click="deleteMemory(selectedMemory?.id)">
+                  <i data-lucide="trash-2"></i> Delete
+                </button>
+              </div>
+            </aside>
+          </div>
+        </main>
+
+        <!-- Page: Graph -->
+        <main class="page page-graph" x-show="page === 'graph'" x-transition:enter="page-enter" x-transition:leave="page-leave">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <button class="btn btn-brand" @click="loadGraph()">
+                <i data-lucide="refresh-cw"></i> Load Graph
+              </button>
+              <button class="btn btn-ghost" @click="graphPhysics = !graphPhysics; loadGraph()" x-text="graphPhysics ? 'Freeze Layout' : 'Unfreeze Layout'"></button>
+              <span class="toolbar-info" x-text="graphNodeCount + ' nodes · ' + graphEdgeCount + ' edges'"></span>
+            </div>
+            <div class="toolbar-right" x-show="!graphFocusMode">
+              <span class="toolbar-hint">Click node to highlight connections. Double-click to reset.</span>
+            </div>
+            <div class="toolbar-right" x-show="graphFocusMode">
+              <span class="toolbar-info" x-text="'Focus: #' + graphFocusId"></span>
+              <input type="range" min="1" max="5" value="2" x-model="graphFocusDepth" class="range-input" style="width:80px;vertical-align:middle">
+              <span class="toolbar-info" x-text="'Depth ' + graphFocusDepth"></span>
+              <button class="btn btn-ghost" @click="loadGraph()">Exit Focus</button>
+            </div>
+          </div>
+          <div class="graph-panel" id="graphContainer"></div>
+        </main>
+
+        <!-- Page: Search -->
+        <main class="page" x-show="page === 'search'" x-transition:enter="page-enter" x-transition:leave="page-leave">
+          <div class="toolbar">
+            <div class="toolbar-left search-bar">
+              <div class="search-box search-box-wide">
+                <i data-lucide="search" class="search-icon"></i>
+                <input type="text" placeholder="Enter your search query…" x-model="searchQuery" @keyup.enter="performSearch()" class="search-input-lg">
+              </div>
+              <select class="select" x-model="searchMode">
+                <option value="hybrid">Hybrid</option>
+                <option value="vector">Vector only</option>
+                <option value="fts">Text only</option>
+              </select>
+              <button class="btn btn-primary" @click="performSearch()">Search</button>
+            </div>
+          </div>
+          <div class="search-results">
+            <template x-for="res in searchResults" :key="res.id">
+              <div class="search-card">
+                <div class="search-card-top">
+                  <span class="score-badge" x-text="(res.score * 100).toFixed(1) + '%'"></span>
+                  <span class="mem-id" x-text="'#' + res.id"></span>
+                  <span class="badge" x-text="res.memory_type || 'semantic'"></span>
+                  <span class="toolbar-info" x-text="'Importance ' + (res.importance || 5)"></span>
+                </div>
+                <p class="search-snippet" x-text="res.content"></p>
+                <div class="search-card-bottom">
+                  <span x-text="'Topic: ' + (res.topic || 'general')"></span>
+                  <span x-text="'Retention: ' + ((res.retention_strength || 0.5) * 100).toFixed(0) + '%'"></span>
+                </div>
+              </div>
+            </template>
+            <div class="empty" x-show="searchResults.length === 0 && searchSearched">
+              <i data-lucide="search-x"></i>
+              <p>No results found</p>
+            </div>
+          </div>
+        </main>
+
+        <!-- Page: Lifecycle -->
+        <main class="page" x-show="page === 'lifecycle'" x-transition:enter="page-enter" x-transition:leave="page-leave">
+          <div class="stat-row stat-row-3">
+            <div class="stat-card stat-hot">
+              <div class="stat-icon" style="background: var(--red-bg); color: var(--red);"><i data-lucide="flame"></i></div>
+              <div class="stat-body">
+                <div class="stat-value" x-text="lifecycle.hot || 0"></div>
+                <div class="stat-label">Hot <span class="label-sub">Tier 1</span></div>
+              </div>
+            </div>
+            <div class="stat-card stat-warm">
+              <div class="stat-icon" style="background: var(--amber-bg); color: var(--amber);"><i data-lucide="thermometer"></i></div>
+              <div class="stat-body">
+                <div class="stat-value" x-text="lifecycle.warm || 0"></div>
+                <div class="stat-label">Warm <span class="label-sub">Tier 2</span></div>
+              </div>
+            </div>
+            <div class="stat-card stat-cold">
+              <div class="stat-icon" style="background: var(--blue-bg); color: var(--blue);"><i data-lucide="snowflake"></i></div>
+              <div class="stat-body">
+                <div class="stat-value" x-text="lifecycle.cold || 0"></div>
+                <div class="stat-label">Cold <span class="label-sub">Tier 3</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h3>Retention Curve</h3>
+              <span class="toolbar-info">Ebbinghaus forgetting curve</span>
+            </div>
+            <div class="panel-body chart-wrap chart-wrap-lg">
+              <canvas id="retentionChart"></canvas>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <h3>Prune Candidates</h3>
+              <button class="btn btn-ghost" @click="previewPrune()">Preview</button>
+            </div>
+            <div class="panel-body" x-show="prunePreview.length > 0">
+              <div class="prune-list">
+                <template x-for="mem in prunePreview" :key="mem.id">
+                  <div class="prune-row">
+                    <span class="mem-id" x-text="'#' + mem.id"></span>
+                    <span class="prune-text" x-text="mem.content.substring(0, 80)"></span>
+                    <span class="score-badge score-low" x-text="((mem.retention_strength || 0) * 100).toFixed(0) + '%'"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <div class="panel-body" x-show="prunePreview.length === 0">
+              <div class="empty empty-sm">
+                <p>Click Preview to see low-retention memories</p>
+              </div>
+            </div>
+          </div>
+        </main>
+
+        <!-- Page: Settings -->
+        <main class="page" x-show="page === 'settings'" x-transition:enter="page-enter" x-transition:leave="page-leave">
+          <div class="settings-grid">
+            <div class="panel">
+              <div class="panel-header"><h3>Connection</h3></div>
+              <div class="panel-body">
+                <div class="detail-field">
+                  <span class="detail-key">Server</span>
+                  <span class="detail-value mono" x-text="serverUrl"></span>
+                </div>
+                <div class="detail-field">
+                  <span class="detail-key">Status</span>
+                  <span class="status-pill" :class="healthStatus === 'ok' ? 'ok' : 'err'" x-text="healthStatus"></span>
+                </div>
+              </div>
+            </div>
+            <div class="panel panel-wide">
+              <div class="panel-header">
+                <h3>API Keys</h3>
+                <div class="panel-actions">
+                  <button class="btn btn-ghost" @click="loadKeys()">Refresh</button>
+                  <button class="btn btn-brand" @click="showNewKey = true">
+                    <i data-lucide="plus"></i> New Key
+                  </button>
+                </div>
+              </div>
+              <div class="panel-body">
+                <table class="table" x-show="apiKeys.length > 0">
+                  <thead>
+                    <tr>
+                      <th>Agent</th>
+                      <th>Prefix</th>
+                      <th>Scopes</th>
+                      <th>Tenant</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="key in apiKeys" :key="key.id">
+                      <tr>
+                        <td class="cell-bold" x-text="key.agent_name"></td>
+                        <td class="cell-mono" x-text="key.key_prefix || '••••'"></td>
+                        <td><span class="badge" x-text="(key.scopes || []).join(', ')"></span></td>
+                        <td x-text="key.tenant_id || 'default'"></td>
+                        <td class="cell-right">
+                          <button class="btn btn-ghost btn-sm" @click="revokeKey(key.id)">
+                            <i data-lucide="trash-2"></i>
+                          </button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+                <div class="empty empty-sm" x-show="apiKeys.length === 0">
+                  <p>No API keys created yet</p>
+                </div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-header"><h3>Data Management</h3></div>
+              <div class="panel-body">
+                <div class="settings-actions">
+                  <button class="btn btn-ghost btn-full" @click="exportData()">
+                    <i data-lucide="download"></i> Export All Data
+                  </button>
+                  <button class="btn btn-ghost btn-full" @click="triggerConsolidation()">
+                    <i data-lucide="merge"></i> Consolidate
+                  </button>
+                  <button class="btn btn-ghost btn-full" @click="triggerLifecycle()">
+                    <i data-lucide="refresh-cw"></i> Run Lifecycle
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </template>
+
+  <!-- New Memory Modal -->
+  <div class="modal-backdrop" x-show="showNewMemory" x-transition.opacity @click.self="showNewMemory = false">
+    <div class="modal" x-show="showNewMemory" x-transition>
+      <div class="modal-header">
+        <h3>New Memory</h3>
+        <button class="btn btn-ghost btn-icon btn-sm" @click="showNewMemory = false"><i data-lucide="x"></i></button>
+      </div>
+      <form @submit.prevent="createMemory()">
+        <div class="modal-body">
+          <div class="field">
+            <label>Content</label>
+            <textarea x-model="newMemory.content" rows="4" required placeholder="What should Ariadne remember?"></textarea>
+          </div>
+          <div class="field-row">
+            <div class="field field-grow">
+              <label>Topic</label>
+              <input type="text" x-model="newMemory.topic" placeholder="general">
+            </div>
+            <div class="field">
+              <label>Importance <span class="field-hint">(1–10)</span></label>
+              <input type="number" x-model.number="newMemory.importance" min="1" max="10" value="5">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" @click="showNewMemory = false">Cancel</button>
+          <button type="submit" class="btn btn-brand">Store Memory</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- New Key Modal -->
+  <div class="modal-backdrop" x-show="showNewKey" x-transition.opacity @click.self="showNewKey = false">
+    <div class="modal" x-show="showNewKey" x-transition>
+      <div class="modal-header">
+        <h3>Create API Key</h3>
+        <button class="btn btn-ghost btn-icon btn-sm" @click="showNewKey = false; newKeyResult = null"><i data-lucide="x"></i></button>
+      </div>
+      <form @submit.prevent="createKey()">
+        <div class="modal-body">
+          <div class="field">
+            <label>Agent Name</label>
+            <input type="text" x-model="newKeyForm.agent_name" required placeholder="my-agent">
+          </div>
+          <div class="field">
+            <label>Tenant ID</label>
+            <input type="text" x-model="newKeyForm.tenant_id" value="default" placeholder="default">
+          </div>
+          <div class="field">
+            <label>Scopes</label>
+            <div class="check-row">
+              <label class="check"><input type="checkbox" value="read" x-model="newKeyForm.scopes"> Read</label>
+              <label class="check"><input type="checkbox" value="write" x-model="newKeyForm.scopes"> Write</label>
+              <label class="check"><input type="checkbox" value="admin" x-model="newKeyForm.scopes"> Admin</label>
+            </div>
+          </div>
+          <div class="key-reveal" x-show="newKeyResult">
+            <div class="key-display" x-text="newKeyResult?.key"></div>
+            <p class="key-warning">Copy this key now — it won't be shown again.</p>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" @click="showNewKey = false; newKeyResult = null">Close</button>
+          <button type="submit" class="btn btn-brand" x-show="!newKeyResult">Create Key</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Loading -->
+  <div class="loading-bar" x-show="loading" x-transition></div>
+
+  <script src="/dashboard/static/js/api.js"></script>
+  <script src="/dashboard/static/js/app.js"></script>
+  <script src="/dashboard/static/js/graph.js"></script>
+  <script src="/dashboard/static/js/charts.js"></script>
+</body>
+</html>

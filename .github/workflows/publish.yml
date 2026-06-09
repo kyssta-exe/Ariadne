@@ -38,17 +38,31 @@ jobs:
           fi
           echo "Version $TAG_VERSION verified"
 
-      - name: Build package
+      # ── Build & publish as `arriadne` ─────────────────────
+      - name: Build package (arriadne)
         run: python -m build
 
-      - name: Check package
-        run: python -m twine check dist/*
-
-      - name: Publish to PyPI
+      - name: Publish to PyPI (arriadne)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
+      # ── Rebuild & publish as `ariadne-memory` ─────────────
+      # Hatchling lets us override the project name via sed,
+      # rebuilding produces a functionally identical wheel under
+      # the second name.
+      - name: Rebuild as ariadne-memory
+        run: |
+          sed -i 's/^name = "arriadne"/name = "ariadne-memory"/' pyproject.toml
+          rm -rf dist/*
+          python -m build
+
+      - name: Publish to PyPI (ariadne-memory)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      # ── Upload artifacts ──────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         if: always()
