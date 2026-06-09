@@ -106,5 +106,5 @@ def resolve_embedder(embedder: Any) -> Embedder | None:
     if isinstance(embedder, str):
         return SentenceTransformerEmbedder(embedder)
     if callable(embedder):
-        return embedder  # type: ignore[return-value]
+        return embedder  # type: ignore[no-any-return]
     raise TypeError(f"Unsupported embedder: {embedder!r}")

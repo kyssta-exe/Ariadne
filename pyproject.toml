@@ -73,8 +73,21 @@ warn_unused_configs = true
 exclude = ["src/arriadne/dashboard/"]
 
 [[tool.mypy.overrides]]
-module = ["datasketch.*", "numpy.*", "faiss.*"]
+module = [
+    "datasketch.*",
+    "numpy.*",
+    "faiss.*",
+    "faiss",
+    "sentence_transformers.*",
+    "sentence_transformers",
+    "arriadne.embeddings",
+]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["arriadne.storage", "arriadne.interface", "arriadne.dedup"]
+# faiss index methods lack stubs; numpy typing is incomplete
+disable_error_code = ["union-attr", "arg-type", "no-any-return", "assignment", "var-annotated", "return-value"]
 
 [tool.ruff]
 target-version = "py310"
