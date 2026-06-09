@@ -417,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
     import_parser.add_argument("source", help="Path to JSON export file")
 
     # maintain
-    maintain_parser = subparsers.add_parser("maintain", help="Run maintenance (consolidate + evict + prune)")
+    subparsers.add_parser("maintain", help="Run maintenance (consolidate + evict + prune)")
 
     # dashboard
     dash_parser = subparsers.add_parser("dashboard", help="Launch web dashboard")
