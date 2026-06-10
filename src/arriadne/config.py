@@ -54,6 +54,7 @@ class AriadneConfig:
     fts_tokenizer: str = "porter unicode61"
     ivf_min_points: int = 1000  # min vectors before an explicit ivf_flat index trains
     max_access_log_per_memory: int = 50  # access_log rows kept per memory after pruning
+    purge_retention_seconds: float = 604800.0  # soft-deleted rows kept recoverable for 7 days
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -79,6 +80,10 @@ class AriadneConfig:
             )
         if self.ivf_min_points < 1:
             raise ValueError(f"ivf_min_points must be >= 1, got {self.ivf_min_points}")
+        if self.purge_retention_seconds < 0:
+            raise ValueError(
+                f"purge_retention_seconds must be >= 0, got {self.purge_retention_seconds}"
+            )
         if self.max_access_log_per_memory < 1:
             raise ValueError(
                 f"max_access_log_per_memory must be >= 1, got {self.max_access_log_per_memory}"

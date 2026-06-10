@@ -534,12 +534,6 @@ class AriadneDB:
             assert memory_id is not None
             memory_id = int(memory_id)
 
-            # Add to FAISS index keyed by the memory's own id (IndexIDMap2)
-            if emb is not None:
-                vec = np.ascontiguousarray(emb.reshape(1, -1), dtype=np.float32)
-                self._faiss_index.add_with_ids(vec, np.asarray([memory_id], dtype=np.int64))
-                self._maybe_upgrade_faiss_index()
-
             # Associate entities
             if entities:
                 for entity_name in entities:
@@ -550,6 +544,14 @@ class AriadneDB:
                     )
 
             self._commit()
+
+            # Add to FAISS only after the row is durably committed, so the index
+            # can never hold a vector for a row that was rolled back.
+            if emb is not None:
+                vec = np.ascontiguousarray(emb.reshape(1, -1), dtype=np.float32)
+                self._faiss_index.add_with_ids(vec, np.asarray([memory_id], dtype=np.int64))
+                self._maybe_upgrade_faiss_index()
+
             logger.info(
                 "Added memory id=%d type=%s importance=%.2f content_preview=%.50s",
                 memory_id, memory_type, importance, content,
@@ -558,9 +560,11 @@ class AriadneDB:
 
         except sqlite3.Error as e:
             logger.error("Database error adding memory: %s", e)
+            self._conn.rollback()
             raise
         except Exception as e:
             logger.error("Unexpected error adding memory: %s", e)
+            self._conn.rollback()
             raise
 
     @_synchronized
@@ -578,6 +582,7 @@ class AriadneDB:
         """
         assert self._conn is not None
         results = []
+        pending_vectors: list[tuple[int, np.ndarray]] = []
         now = _now()
         try:
             for mem in memories:
@@ -619,11 +624,9 @@ class AriadneDB:
                 assert memory_id is not None
                 memory_id = int(memory_id)
 
-                # Add to FAISS
+                # Defer FAISS insertion until after the transaction commits
                 if emb is not None:
-                    vec = np.ascontiguousarray(emb.reshape(1, -1), dtype=np.float32)
-                    self._faiss_index.add_with_ids(vec, np.asarray([memory_id], dtype=np.int64))
-                    self._maybe_upgrade_faiss_index()
+                    pending_vectors.append((memory_id, emb))
 
                 # Associate entities
                 entities = mem.get("entities")
@@ -638,6 +641,15 @@ class AriadneDB:
                 results.append({"memory_id": memory_id, "status": "created"})
 
             self._commit()
+
+            if pending_vectors:
+                ids = np.asarray([mid for mid, _ in pending_vectors], dtype=np.int64)
+                matrix = np.ascontiguousarray(
+                    np.vstack([v.reshape(1, -1) for _, v in pending_vectors]), dtype=np.float32
+                )
+                self._faiss_index.add_with_ids(matrix, ids)
+                self._maybe_upgrade_faiss_index()
+
             logger.info("Bulk add: %d memories, %d created, %d duplicates",
                         len(memories),
                         sum(1 for r in results if r["status"] == "created"),
@@ -645,8 +657,10 @@ class AriadneDB:
             return results
         except sqlite3.Error as e:
             logger.error("Database error in bulk add: %s", e)
+            self._conn.rollback()
             raise
 
+    @_synchronized
     def export_all(self) -> dict[str, Any]:
         """Export all active memories, entities, and links as a JSON-safe dict."""
         assert self._conn is not None
@@ -654,7 +668,7 @@ class AriadneDB:
         for row in self._conn.execute(
             """SELECT id, content, content_hash, memory_type, importance,
                       created_at, updated_at, accessed_at, access_count,
-                      retention_strength, metadata, tags
+                      retention_strength, metadata, tags, embedding
                FROM memories WHERE is_deleted = 0 ORDER BY id"""
         ).fetchall():
             mem = {
@@ -670,6 +684,10 @@ class AriadneDB:
                 "retention_strength": row[9],
                 "metadata": json.loads(row[10]) if row[10] else None,
                 "tags": json.loads(row[11]) if row[11] else [],
+                "embedding": (
+                    np.frombuffer(row[12], dtype=np.float32).tolist()
+                    if row[12] is not None else None
+                ),
             }
             # Get entities for this memory
             entity_rows = self._conn.execute(
@@ -693,35 +711,61 @@ class AriadneDB:
 
         return {"version": 1, "memories": memories, "entities": entities, "memory_links": memory_links}
 
+    @_synchronized
     def import_all(self, data: dict[str, Any]) -> int:
-        """Import memories from an export dict. Returns count imported."""
+        """Import memories from an export dict. Returns count imported.
+
+        Imported rows receive fresh autoincrement ids, so exported ids are
+        remapped (old -> new) and ``memory_links`` are rewritten through that
+        map. Links whose endpoints were not part of the import are skipped
+        rather than attached to whatever rows happen to share the old ids.
+        """
         assert self._conn is not None
         count = 0
         now = _now()
+        dim = self._config.embedding_dim
+        id_map: dict[int, int] = {}
         try:
             for mem in data.get("memories", []):
                 content = mem.get("content", "")
                 content_hash = _hash_content(content)
+                old_id = mem.get("id")
                 cursor = self._conn.execute(
                     "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
                     (content_hash,),
                 )
                 existing = cursor.fetchone()
                 if existing is not None:
-                    continue  # skip duplicates
+                    # Duplicate: map the exported id onto the existing row so
+                    # links referencing it still resolve.
+                    if old_id is not None:
+                        id_map[int(old_id)] = int(existing[0])
+                    continue
 
                 metadata_json = json.dumps(mem.get("metadata")) if mem.get("metadata") else None
                 tags_json = json.dumps(mem.get("tags", []))
                 importance = _clamp01(mem.get("importance", 0.5))
 
+                embedding_blob = None
+                embedding = mem.get("embedding")
+                if embedding is not None:
+                    emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
+                    if emb.shape[0] == dim:
+                        embedding_blob = emb.tobytes()
+                    else:
+                        logger.warning(
+                            "Import: dropping embedding with dim %d != configured %d",
+                            emb.shape[0], dim,
+                        )
+
                 cursor = self._conn.execute(
                     """INSERT INTO memories
-                       (content, content_hash, memory_type, importance,
+                       (content, content_hash, memory_type, importance, embedding,
                         created_at, updated_at, accessed_at, access_count,
                         retention_strength, metadata, tags)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (content, content_hash,
-                     mem.get("memory_type", "semantic"), importance,
+                     mem.get("memory_type", "semantic"), importance, embedding_blob,
                      mem.get("created_at", now), now,
                      mem.get("accessed_at", now), mem.get("access_count", 0),
                      mem.get("retention_strength", 1.0), metadata_json, tags_json),
@@ -729,6 +773,8 @@ class AriadneDB:
                 memory_id = cursor.lastrowid
                 assert memory_id is not None
                 memory_id = int(memory_id)
+                if old_id is not None:
+                    id_map[int(old_id)] = memory_id
 
                 # Re-associate entities (create if needed)
                 for entity_name in mem.get("entities", []):
@@ -739,20 +785,33 @@ class AriadneDB:
                     )
                 count += 1
 
-            # Re-import memory_links
+            # Re-import memory_links, remapping endpoints to their new ids.
+            skipped_links = 0
             for link in data.get("memory_links", []):
+                source_id = id_map.get(link.get("source_id"))
+                target_id = id_map.get(link.get("target_id"))
+                if source_id is None or target_id is None:
+                    skipped_links += 1
+                    continue
                 self._conn.execute(
                     """INSERT OR IGNORE INTO memory_links (source_id, target_id, link_type, strength, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
-                    (link["source_id"], link["target_id"], link.get("link_type", "related"),
+                    (source_id, target_id, link.get("link_type", "related"),
                      link.get("strength", 1.0), link.get("created_at", now)),
                 )
+            if skipped_links:
+                logger.warning("Import: skipped %d links with unresolvable endpoints", skipped_links)
 
             self._commit()
+            # Imported rows bypassed the live FAISS index; rebuild so their
+            # embeddings become searchable immediately, not only after reopen.
+            if count:
+                self._faiss_index = self._build_faiss_from_db()
             logger.info("Import: %d memories imported", count)
             return count
         except sqlite3.Error as e:
             logger.error("Database error in import: %s", e)
+            self._conn.rollback()
             raise
 
     def _get_or_create_entity(self, name: str) -> int:
@@ -856,6 +915,7 @@ class AriadneDB:
             self._commit()
         except sqlite3.Error as e:
             logger.error("Error touching memories: %s", e)
+            self._conn.rollback()
 
     @_synchronized
     def update_memory(
@@ -918,7 +978,10 @@ class AriadneDB:
                 params,
             )
 
-            # Keep FAISS in sync: IndexIDMap2 lets us replace a vector by its id.
+            self._commit()
+
+            # Keep FAISS in sync after the commit: IndexIDMap2 lets us replace
+            # a vector by its id.
             if emb is not None:
                 id_array = np.asarray([memory_id], dtype=np.int64)
                 try:
@@ -929,12 +992,12 @@ class AriadneDB:
                 self._faiss_index.add_with_ids(vec, id_array)
                 self._maybe_upgrade_faiss_index()
 
-            self._commit()
             logger.info("Updated memory %d", memory_id)
             return True
 
         except sqlite3.Error as e:
             logger.error("Database error updating memory %d: %s", memory_id, e)
+            self._conn.rollback()
             return False
 
     @_synchronized
@@ -957,11 +1020,14 @@ class AriadneDB:
                 return False
 
             if hard:
-                self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+                # Children first: with foreign_keys=ON, deleting the parent row
+                # while memory_entities/memory_links/access_log still reference
+                # it fails with "FOREIGN KEY constraint failed".
                 self._conn.execute("DELETE FROM memory_entities WHERE memory_id = ?", (memory_id,))
                 self._conn.execute("DELETE FROM memory_links WHERE source_id = ? OR target_id = ?",
                                    (memory_id, memory_id))
                 self._conn.execute("DELETE FROM access_log WHERE memory_id = ?", (memory_id,))
+                self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
                 # Remove the vector from FAISS by its id (IndexIDMap2)
                 if self._faiss_index is not None:
                     try:
@@ -981,6 +1047,7 @@ class AriadneDB:
 
         except sqlite3.Error as e:
             logger.error("Database error deleting memory %d: %s", memory_id, e)
+            self._conn.rollback()
             return False
 
     @_synchronized
@@ -1227,6 +1294,7 @@ class AriadneDB:
             logger.debug("Added edge %s ->%s (type=%s)", source_entity, target_entity, edge_type)
         except sqlite3.Error as e:
             logger.error("Error adding edge: %s", e)
+            self._conn.rollback()
 
     @_synchronized
     def traverse_graph(
@@ -1449,6 +1517,7 @@ class AriadneDB:
 
         except sqlite3.Error as e:
             logger.error("Eviction error: %s", e)
+            self._conn.rollback()
             return 0
 
     @_synchronized
@@ -1569,6 +1638,7 @@ class AriadneDB:
 
         except sqlite3.Error as e:
             logger.error("Consolidation error: %s", e)
+            self._conn.rollback()
             return 0
 
     @_synchronized
@@ -1601,6 +1671,7 @@ class AriadneDB:
             return deleted
         except sqlite3.Error as e:
             logger.error("Access log prune error: %s", e)
+            self._conn.rollback()
             return 0
 
     @_synchronized
@@ -1620,12 +1691,13 @@ class AriadneDB:
             )
             ids = [int(r[0]) for r in cursor.fetchall()]
             for mid in ids:
-                self._conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
+                # Children first (foreign_keys=ON), then the memory row itself.
                 self._conn.execute("DELETE FROM memory_entities WHERE memory_id = ?", (mid,))
                 self._conn.execute(
                     "DELETE FROM memory_links WHERE source_id = ? OR target_id = ?", (mid, mid)
                 )
                 self._conn.execute("DELETE FROM access_log WHERE memory_id = ?", (mid,))
+                self._conn.execute("DELETE FROM memories WHERE id = ?", (mid,))
                 if self._faiss_index is not None:
                     try:
                         self._faiss_index.remove_ids(np.asarray([mid], dtype=np.int64))
@@ -1636,6 +1708,7 @@ class AriadneDB:
             return len(ids)
         except sqlite3.Error as e:
             logger.error("Purge error: %s", e)
+            self._conn.rollback()
             return 0
 
     @_synchronized

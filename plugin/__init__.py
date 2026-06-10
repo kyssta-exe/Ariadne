@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Hermes MemoryProvider ABC
@@ -25,7 +24,7 @@ import sys
 _HERMES_AGENT = "/usr/local/lib/hermes-agent"
 if _HERMES_AGENT not in sys.path:
     sys.path.insert(0, _HERMES_AGENT)
-from agent.memory_provider import MemoryProvider
+from agent.memory_provider import MemoryProvider  # noqa: E402 — needs the sys.path insert above
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +64,8 @@ class AriadneMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         """Check if Ariadne is installed and configured."""
-        try:
-            from arriadne import AriadneMemory
-            return True
-        except ImportError:
-            return False
+        import importlib.util
+        return importlib.util.find_spec("arriadne") is not None
 
     def initialize(self, session_id: str, **kwargs) -> None:
         """Open/initialize the Ariadne database."""
@@ -474,16 +470,15 @@ class AriadneMemoryProvider(MemoryProvider):
 
     def _handle_export(self, args: Dict) -> str:
         import json as _json
-        stats = self._ariadne.stats()
-        # Export: dump all memories via recall of empty query
-        try:
-            all_results = self._ariadne.recall("", k=10000)
-        except:
-            all_results = []
-        data = {"stats": stats, "memories": self._simplify_results(all_results)}
+        # export_json() dumps every active memory; recall("") matches nothing
+        # in FTS, so the old approach silently exported an empty list.
+        data = self._ariadne.export_json()
+        data["stats"] = self._ariadne.stats()
         with open(args["output_path"], "w") as f:
             _json.dump(data, f, indent=2, default=str)
-        return json.dumps({"exported": len(all_results), "path": args["output_path"]})
+        return json.dumps(
+            {"exported": len(data.get("memories", [])), "path": args["output_path"]}
+        )
 
     def _handle_import(self, args: Dict) -> str:
         import json as _json
@@ -631,10 +626,10 @@ class AriadneMemoryProvider(MemoryProvider):
         try:
             if self._ariadne:
                 self._ariadne.close()
-        except:
-            pass
+        except Exception:
+            logger.debug("Error closing Ariadne DB on shutdown", exc_info=True)
         try:
             if self._shared:
                 self._shared.close()
-        except:
-            pass
+        except Exception:
+            logger.debug("Error closing shared Ariadne DB on shutdown", exc_info=True)

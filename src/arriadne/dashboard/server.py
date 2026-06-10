@@ -246,9 +246,9 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         return _jsonable(d)
 
     @app.post("/api/memories")
-    def api_memories_create(request: Request) -> Any:
+    async def api_memories_create(request: Request) -> Any:
         """Add a new memory."""
-        body = _safe_json(request)
+        body = await _safe_json(request)
         content = body.get("content", "")
         if not content.strip():
             raise HTTPException(status_code=400, detail="content is required")
@@ -267,9 +267,9 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         return _jsonable(result)
 
     @app.put("/api/memories/{memory_id}")
-    def api_memories_update(memory_id: int, request: Request) -> Any:
+    async def api_memories_update(memory_id: int, request: Request) -> Any:
         """Update an existing memory."""
-        body = _safe_json(request)
+        body = await _safe_json(request)
         ok = mem.update(
             memory_id,
             content=body.get("content"),
@@ -415,6 +415,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         2. Save the uploaded file over the current database path.
         3. Reinitialize the memory system.
         """
+        nonlocal mem  # rebinding the closure variable on reinit below
         db = mem._db
         db_path = Path(db._config.db_path)
 
@@ -426,9 +427,21 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         if db_path.exists():
             shutil.copy2(str(db_path), str(safety_backup))
 
+        # --- close the live connection BEFORE overwriting the files ----------
+        # (Writing over a database that still has an open WAL connection, or
+        # leaving stale -wal/-shm files beside the new file, corrupts it.)
+        try:
+            mem.close()
+        except Exception:
+            pass
+
         # --- replace DB with uploaded file -----------------------------------
         try:
             contents = await file.read()
+            for suffix in ("-wal", "-shm"):
+                stale = Path(str(db_path) + suffix)
+                if stale.exists():
+                    stale.unlink()
             with open(str(db_path), "wb") as f:
                 f.write(contents)
         except Exception as exc:
@@ -436,14 +449,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
 
         # --- reinitialize memory system --------------------------------------
         try:
-            # Close old connection if open
-            if db.conn is not None:
-                try:
-                    db.conn.close()
-                except Exception:
-                    pass
             # Re-create AriadneMemory with the same config (points to the new file)
-            nonlocal mem  # noqa: F811 — rebinding the closure variable
             mem = AriadneMemory(config=config)
         except Exception as exc:
             # If reinit fails, try to restore from safety backup
@@ -693,23 +699,23 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         if not base_mem:
             raise HTTPException(status_code=404, detail="Memory not found")
 
-        cte_query = f"""
+        cte_query = """
             WITH RECURSIVE neighbors(id, depth) AS (
-                SELECT {memory_id}, 0
-                UNION ALL
-                SELECT 
-                    CASE 
-                        WHEN ml.source_id = n.id THEN ml.target_id 
-                        ELSE ml.source_id 
+                SELECT ?, 0
+                UNION
+                SELECT
+                    CASE
+                        WHEN ml.source_id = n.id THEN ml.target_id
+                        ELSE ml.source_id
                     END,
                     n.depth + 1
                 FROM memory_links ml
                 JOIN neighbors n ON (ml.source_id = n.id OR ml.target_id = n.id)
-                WHERE n.depth < {depth}
+                WHERE n.depth < ?
             )
             SELECT DISTINCT id FROM neighbors
         """
-        neighbor_ids = [row[0] for row in conn.execute(cte_query).fetchall()]
+        neighbor_ids = [row[0] for row in conn.execute(cte_query, (memory_id, depth)).fetchall()]
 
         if not neighbor_ids:
             return {"center_id": memory_id, "depth": depth, "nodes": [], "edges": []}
@@ -766,9 +772,9 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         return _jsonable(mem.export_json())
 
     @app.post("/api/import")
-    def api_import(request: Request) -> Any:
+    async def api_import(request: Request) -> Any:
         """Import from previously exported JSON."""
-        data = _safe_json(request)
+        data = await _safe_json(request)
         if not data or "memories" not in data:
             return {"error": "Invalid import data", "count": 0}
         count = mem.import_json(data)
@@ -811,16 +817,18 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
     return app
 
 
-def _safe_json(request: Request) -> dict[str, Any]:
-    """Parse JSON body, return empty dict on failure."""
+async def _safe_json(request: Request) -> dict[str, Any]:
+    """Parse JSON body, return empty dict on failure.
+
+    Starlette only exposes the request body asynchronously (``await
+    request.body()``); the previous sync implementation read the unset
+    ``_body`` attribute and always returned ``{}``, silently breaking every
+    POST/PUT endpoint.
+    """
     try:
-        body_bytes: bytes = b""
-        # FastAPI / Starlette stores raw body in request._body
-        if hasattr(request, "_body") and request._body:
-            body_bytes = request._body
-        elif hasattr(request, "body"):
-            body_bytes = request.body  # type: ignore[assignment]
-        return json.loads(body_bytes) if body_bytes else {}
+        body_bytes = await request.body()
+        parsed = json.loads(body_bytes) if body_bytes else {}
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
 
@@ -854,6 +862,23 @@ if __name__ == "__main__":
 
 # ---------------------------------------------------------------------------
 # Module-level app for `uvicorn arriadne.dashboard.server:app`
+#
+# Lazy ASGI wrapper: the real app (and its SQLite database) is only created on
+# the first request, so merely importing this module — e.g. `from
+# arriadne.dashboard.server import create_app` — no longer creates an
+# `arriadne.db` file in the current working directory as a side effect.
 # ---------------------------------------------------------------------------
 
-app = create_app(db_path=os.environ.get("ARIADNE_DB_PATH", "arriadne.db"))
+class _LazyApp:
+    def __init__(self) -> None:
+        self._app: FastAPI | None = None
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if self._app is None:
+            self._app = create_app(
+                db_path=os.environ.get("ARIADNE_DB_PATH", "arriadne.db")
+            )
+        await self._app(scope, receive, send)
+
+
+app = _LazyApp()

@@ -57,6 +57,8 @@ class AriadneMemory:
         # Reentrant lock guarding the (not thread-safe) MinHash dedup index.
         # AriadneDB has its own lock for SQLite + FAISS.
         self._lock = threading.RLock()
+        # Per-instance auto-maintenance write counter.
+        self._write_count = 0
 
         # Optional embedder: when set, remember()/recall() auto-embed content and
         # queries so semantic search works without the caller wiring vectors.
@@ -313,9 +315,10 @@ class AriadneMemory:
         """
         try:
             with self._lock:
-                # Remove from dedup index
-                self._dedup.remove(str(memory_id))
                 result = self._db.delete_memory(memory_id, hard=hard)
+                # Remove from dedup index only once the delete actually happened
+                if result:
+                    self._dedup.remove(str(memory_id))
             logger.info("Forget: id=%d hard=%s result=%s", memory_id, hard, result)
             return result
         except Exception as e:
@@ -351,11 +354,8 @@ class AriadneMemory:
                     embedding = self._embedder(content)
 
                 emb_array = None
-                # Auto-re-embed if content changed and no embedding provided
                 if embedding is not None:
                     emb_array = np.asarray(embedding, dtype=np.float32)
-                elif content is not None and self._embedder is not None:
-                    emb_array = np.asarray(self._embedder(content), dtype=np.float32)
 
                 result = self._db.update_memory(
                     memory_id,
@@ -478,7 +478,11 @@ class AriadneMemory:
             consolidated = self.consolidate()
             evicted = self._db.evict()
             pruned = self._db.prune_access_log()
-            purged = self._db.purge_deleted()
+            # Keep recently soft-deleted rows recoverable; purging with 0 here
+            # would permanently destroy everything evict() just soft-deleted.
+            purged = self._db.purge_deleted(
+                older_than_seconds=self._config.purge_retention_seconds
+            )
         return {
             "consolidated": consolidated,
             "evicted": evicted,
@@ -487,14 +491,15 @@ class AriadneMemory:
         }
 
     # Auto-maintenance: call every N writes to keep things tidy
-    _write_count: int = 0
     _maintenance_interval: int = 50
 
     def _maybe_maintain(self) -> None:
         """Trigger maintenance every _maintenance_interval writes."""
-        AriadneMemory._write_count += 1
-        if AriadneMemory._write_count >= self._maintenance_interval:
-            AriadneMemory._write_count = 0
+        # Per-instance counter: a class-level counter would couple unrelated
+        # AriadneMemory instances (e.g. the primary and shared DBs).
+        self._write_count += 1
+        if self._write_count >= self._maintenance_interval:
+            self._write_count = 0
             try:
                 self.maintenance()
                 logger.info("Auto-maintenance completed")
@@ -513,24 +518,32 @@ class AriadneMemory:
             List of result dicts per item.
         """
         with self._lock:
-            # Batch-embed if embedder is configured
+            # Batch-embed if embedder is configured. Embedders are per-text
+            # callables (str -> vector); use embed_batch when available,
+            # otherwise embed each text individually.
             if self._embedder is not None:
-                texts = [item.get("content", "") for item in items]
-                embeddings = self._embedder(texts)  # batch embed
-                for i, item in enumerate(items):
-                    if i < len(embeddings) and "embedding" not in item:
-                        item["embedding"] = embeddings[i]
+                to_embed = [
+                    (i, item.get("content", ""))
+                    for i, item in enumerate(items)
+                    if item.get("embedding") is None
+                ]
+                if to_embed:
+                    texts = [text for _, text in to_embed]
+                    embed_batch = getattr(self._embedder, "embed_batch", None)
+                    if callable(embed_batch):
+                        embeddings = embed_batch(texts)
+                    else:
+                        embeddings = [self._embedder(text) for text in texts]
+                    for (i, _), emb in zip(to_embed, embeddings):
+                        items[i]["embedding"] = emb
 
             results = self._db.add_memories_bulk(items)
 
-            # Update dedup index for created memories
-            for res in results:
-                if res["status"] == "created":
-                    mid = res["memory_id"]
-                    for item in items:
-                        if item.get("content"):
-                            self._dedup.add(item["content"], doc_id=str(mid))
-                            break
+            # Update dedup index for created memories. add_memories_bulk
+            # returns one result per item, in order, so pair them positionally.
+            for item, res in zip(items, results):
+                if res["status"] == "created" and item.get("content"):
+                    self._dedup.add(item["content"], doc_id=str(res["memory_id"]))
 
             self._maybe_maintain()
             return results

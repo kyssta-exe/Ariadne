@@ -199,7 +199,7 @@ class Deduplicator:
         related = []
         for doc_id, stored_m in self._minhashes.items():
             similarity = m.jaccard(stored_m)
-            if similarity > 0.0 and doc_id not in [r["id"] for r in related]:
+            if similarity > 0.0:
                 related.append({
                     "id": doc_id,
                     "content": self._contents.get(doc_id, ""),
