@@ -476,7 +476,7 @@ class AddonRegistry:
     def __len__(self) -> int:
         return len(self._addons)
 
-    def __iter__(self) -> Iterator["AddonBase"]:
+    def __iter__(self) -> Iterator[BaseAddon]:
         return iter(self._addons.values())
 
     # -- Aggregated views -----------------------------------------------------
