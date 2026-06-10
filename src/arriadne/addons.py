@@ -25,7 +25,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ class AddonRegistry:
             try:
                 from importlib.metadata import entry_points
                 all_eps = entry_points()
-                eps = all_eps.get("ariadne.addons", [])  # type: ignore[assignment]
+                eps = all_eps.get("ariadne.addons", [])  # type: ignore[arg-type]
             except Exception as exc:
                 logger.error("Failed to load entry_points: %s", exc)
                 return found
@@ -476,7 +476,7 @@ class AddonRegistry:
     def __len__(self) -> int:
         return len(self._addons)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator["AddonBase"]:
         return iter(self._addons.values())
 
     # -- Aggregated views -----------------------------------------------------
