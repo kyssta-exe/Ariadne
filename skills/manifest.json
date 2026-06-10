@@ -1,0 +1,28 @@
+{
+  "name": "Ariadne Skills",
+  "version": "0.10.1",
+  "description": "Hermes skills for Ariadne memory system and addons",
+  "skills": [
+    {
+      "name": "ariadne",
+      "path": "ariadne/SKILL.md",
+      "description": "Core Ariadne memory system — FAISS + FTS5 + knowledge graph",
+      "category": "productivity",
+      "requires": ["ariadne-memory"],
+      "tags": ["memory", "ai-agent", "FAISS", "knowledge-graph", "hermes-plugin"]
+    },
+    {
+      "name": "ariadne-finance",
+      "path": "ariadne-finance/SKILL.md",
+      "description": "Finance research — PDF/Excel extraction, ticker recognition, financial knowledge graph",
+      "category": "productivity",
+      "requires": ["ariadne-memory", "ariadne-finance"],
+      "tags": ["finance", "research", "pdf", "tickers", "knowledge-graph"]
+    }
+  ],
+  "install": {
+    "method": "copy",
+    "source_url": "https://github.com/kyssta-exe/Ariadne/tree/main/skills",
+    "instructions": "Copy the skill directory to ~/.hermes/skills/ or use: hermes skill install <name>"
+  }
+}

@@ -12,6 +12,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/' },
       { text: 'API Reference', link: '/api/' },
+      { text: 'Addons', link: '/addons/' },
       { text: 'Benchmarks', link: '/benchmarks' },
       { text: 'GitHub', link: 'https://github.com/kyssta-exe/Ariadne' },
     ],
@@ -43,6 +44,14 @@ export default defineConfig({
           { text: 'Architecture', link: '/guide/architecture' },
           { text: 'Embeddings', link: '/guide/embeddings' },
           { text: 'Migration', link: '/guide/migration' },
+          { text: 'Addons', link: '/guide/addons' },
+        ],
+      },
+      {
+        text: 'Addons',
+        items: [
+          { text: 'Overview', link: '/addons/' },
+          { text: 'Finance', link: '/addons/finance' },
         ],
       },
       {
