@@ -308,6 +308,76 @@ mem.close()
 
 ---
 
+## Addons
+
+Ariadne supports domain-specific addons that extend the core memory system
+with specialized extractors, entity types, CLI commands, and API endpoints.
+Addons are separate pip packages discovered automatically via Python entry points.
+
+### Available Addons
+
+| Addon | Description | Install |
+|-------|-------------|---------|
+| [ariadne-finance](addons/finance/) | Finance research — PDF/Excel extraction, ticker recognition, financial knowledge graph | `pip install ariadne-finance` |
+
+### Installing an Addon
+
+```bash
+# Install the finance addon (Excel + CSV only)
+pip install ariadne-finance
+
+# With PDF support
+pip install "ariadne-finance[pdf]"
+
+# Full (PDF + yfinance for market data)
+pip install "ariadne-finance[full]"
+```
+
+Once installed, the addon is auto-discovered — no configuration needed:
+
+```python
+from arriadne.addons import AddonRegistry
+
+registry = AddonRegistry()
+registry.discover()  # finds all installed addons
+print(registry.addon_names)  # ['ariadne-finance']
+
+# Use addon extractors
+extractor = registry.get_extractor_for_file("report.pdf")
+result = extractor.extract("report.pdf")
+
+registry.shutdown()
+```
+
+### Creating Your Own Addon
+
+See [docs/addons/index.md](docs/addons/index.md) for the full addon authoring guide.
+Quick start:
+
+```python
+from arriadne.addons import BaseAddon, ExtractorBase, EntityType
+
+class MyAddon(BaseAddon):
+    name = "my-addon"
+    version = "0.1.0"
+    description = "My custom addon"
+
+    def get_extractors(self):
+        return [MyExtractor()]
+
+    def get_entity_types(self):
+        return [EntityType(name="custom", display_name="Custom Entity")]
+```
+
+Register in your `pyproject.toml`:
+
+```toml
+[project.entry-points."ariadne.addons"]
+my-addon = "my_addon:MyAddon"
+```
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

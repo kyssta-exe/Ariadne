@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ariadne-finance"
+version = "0.10.0"
+description = "Finance research add-on for Ariadne — PDF/Excel extraction, ticker recognition, financial knowledge graph"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Kyssta", email = "kyssta@users.noreply.github.com" },
+]
+keywords = ["finance", "research", "ariadne", "memory", "pdf", "tickers"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial",
+]
+
+dependencies = [
+    "ariadne>=0.10.0",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+pdf = ["marker-pdf>=1.0", "pdfplumber>=0.10"]
+full = ["marker-pdf>=1.0", "pdfplumber>=0.10", "yfinance>=0.2"]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[project.entry-points."ariadne.addons"]
+finance = "ariadne_finance:Addon"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ariadne_finance"]
