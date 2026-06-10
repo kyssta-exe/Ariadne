@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arriadne"
-version = "0.10.0"
+version = "0.11.0"
 description = "AI agent memory system — sub-millisecond hybrid search (FAISS vector + FTS5 keyword + RRF fusion), knowledge graph traversal, cognitive retention modeling, and auto-deduplication. Zero infrastructure."
 readme = "README.md"
 license = "MIT"
