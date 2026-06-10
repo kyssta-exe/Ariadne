@@ -465,6 +465,38 @@ function app() {
       }
     },
 
+    async backupDatabase() {
+      this.loading = true;
+      try {
+        const result = await AriadneAPI.backup();
+        alert('Backup saved: ' + result.filename);
+      } catch (e) {
+        alert('Backup failed: ' + e.message);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async restoreDatabase(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      if (!confirm('Restore database from ' + file.name + '? This will overwrite current data.')) {
+        event.target.value = '';
+        return;
+      }
+      this.loading = true;
+      try {
+        await AriadneAPI.restore(file);
+        alert('Database restored successfully.');
+        await this.loadDashboard();
+      } catch (e) {
+        alert('Restore failed: ' + e.message);
+      } finally {
+        this.loading = false;
+        event.target.value = '';
+      }
+    },
+
     // Page change handler
     onPageChange(page) {
       setTimeout(() => {

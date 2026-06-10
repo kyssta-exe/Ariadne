@@ -2,6 +2,18 @@
 
 All notable changes to Ariadne will be documented in this file.
 
+## [0.10.0] - 2026-06-10
+
+### Added
+- **Backup & Restore**: `ariadne backup` and `ariadne restore` CLI commands for SQLite-level database backup with WAL checkpoint, safety backups, and verification
+- **Dashboard Backup/Restore**: Settings page now has Backup Database and Restore Database buttons with `/api/backup` and `/api/restore` endpoints
+- **Hermes Skill**: Complete skill documentation at `~/.hermes/skills/productivity/ariadne/SKILL.md` covering all 25 plugin tools, setup, backup/restore, and best practices
+- **Backup/Restore Documentation**: Full guide at `docs/guide/backup-restore.md` covering CLI, Dashboard, Python API, cron scheduling, and migration
+
+### Improved
+- README expanded with detailed Hermes integration section (all 19 tools documented) and Backup & Restore section
+- CLI help now shows backup and restore commands
+
 ## [0.1.0] - 2024-01-01
 
 ### Added

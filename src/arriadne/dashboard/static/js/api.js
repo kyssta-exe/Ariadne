@@ -88,6 +88,47 @@ const AriadneAPI = {
   async exportData() { return this.request('GET', '/api/stats'); },
   async importData(data) { return this.request('POST', '/api/memories', data); },
 
+  // Backup / Restore
+  async backup() {
+    const opts = { method: 'GET', headers: this.headers() };
+    const res = await fetch(`${this.baseUrl}/api/backup`, opts);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || `Backup failed: HTTP ${res.status}`);
+    }
+    // Trigger browser download
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^";\n]+)"?/);
+    const filename = match ? match[1] : `ariadne-backup-${new Date().toISOString().slice(0, 19)}.db`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return { ok: true, filename };
+  },
+
+  async restore(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const headers = {};
+    if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
+    const res = await fetch(`${this.baseUrl}/api/restore`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || `Restore failed: HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+
   // Keys (admin) — not applicable in local mode
   async createKey() { return { key: 'local-mode-no-keys' }; },
   async listKeys() { return { keys: [] }; },

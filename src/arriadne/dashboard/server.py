@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -24,7 +25,8 @@ from arriadne.interface import AriadneMemory
 try:
     from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+    from fastapi import UploadFile
     from fastapi.staticfiles import StaticFiles
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(
@@ -383,6 +385,82 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         """Return current config as JSON."""
         from dataclasses import asdict
         return _jsonable(asdict(config))
+
+    @app.get("/api/backup")
+    def api_backup() -> FileResponse:
+        """Download the database file as a backup.
+
+        Performs a WAL checkpoint first to ensure all pending writes
+        are flushed to the main database file.
+        """
+        db = mem._db
+        conn = db.conn
+        # WAL checkpoint: flush WAL into the main .db file
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        db_file = Path(db._config.db_path)
+        if not db_file.exists():
+            raise HTTPException(status_code=500, detail="Database file not found")
+        return FileResponse(
+            path=str(db_file),
+            media_type="application/octet-stream",
+            filename=db_file.name,
+        )
+
+    @app.post("/api/restore")
+    async def api_restore(file: UploadFile) -> dict[str, Any]:
+        """Restore the database from an uploaded .db file.
+
+        Steps:
+        1. Create a safety backup of the current database.
+        2. Save the uploaded file over the current database path.
+        3. Reinitialize the memory system.
+        """
+        db = mem._db
+        db_path = Path(db._config.db_path)
+
+        # --- safety backup ---------------------------------------------------
+        backup_dir = db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        safety_backup = backup_dir / f"{db_path.stem}_backup_{ts}.db"
+        if db_path.exists():
+            shutil.copy2(str(db_path), str(safety_backup))
+
+        # --- replace DB with uploaded file -----------------------------------
+        try:
+            contents = await file.read()
+            with open(str(db_path), "wb") as f:
+                f.write(contents)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {exc}") from exc
+
+        # --- reinitialize memory system --------------------------------------
+        try:
+            # Close old connection if open
+            if db.conn is not None:
+                try:
+                    db.conn.close()
+                except Exception:
+                    pass
+            # Re-create AriadneMemory with the same config (points to the new file)
+            nonlocal mem  # noqa: F811 — rebinding the closure variable
+            mem = AriadneMemory(config=config)
+        except Exception as exc:
+            # If reinit fails, try to restore from safety backup
+            if safety_backup.exists():
+                shutil.copy2(str(safety_backup), str(db_path))
+                mem = AriadneMemory(config=config)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Restore succeeded but reinitialization failed: {exc}; "
+                       f"safety backup saved at {safety_backup}",
+            ) from exc
+
+        return {
+            "status": "ok",
+            "safety_backup": str(safety_backup),
+            "db_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
+        }
 
     @app.post("/api/consolidate")
     def api_consolidate() -> Any:

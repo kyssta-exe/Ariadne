@@ -624,6 +624,13 @@
                   <button class="btn btn-ghost btn-full" @click="triggerLifecycle()">
                     <i data-lucide="refresh-cw"></i> Run Lifecycle
                   </button>
+                  <button class="btn btn-ghost btn-full" @click="backupDatabase()" :disabled="loading">
+                    <i data-lucide="hard-drive-download"></i> Backup Database
+                  </button>
+                  <button class="btn btn-ghost btn-full" @click="$refs.restoreFileInput.click()" :disabled="loading">
+                    <i data-lucide="hard-drive-upload"></i> Restore Database
+                  </button>
+                  <input type="file" x-ref="restoreFileInput" @change="restoreDatabase($event)" accept=".db,.sqlite,.sqlite3,.backup,.json" style="display:none">
                 </div>
               </div>
             </div>

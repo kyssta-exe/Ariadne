@@ -6,8 +6,11 @@ Provides init, add, search, stats, and migrate commands.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import logging
+import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -256,6 +259,123 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_backup(args: argparse.Namespace) -> int:
+    """Create a consistent SQLite backup of the Ariadne database.
+
+    Performs a WAL checkpoint, then copies .db, .wal, and .shm files.
+    Default output name: arriadne-backup-YYYYMMDDTHHMMSS.db
+    """
+    try:
+        db_path = Path(args.db_path)
+        if not db_path.exists():
+            print(f"Database not found: {db_path}", file=sys.stderr)
+            return 1
+
+        # Determine output path
+        if args.output:
+            output_path = Path(args.output)
+        else:
+            ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+            output_path = Path(f"arriadne-backup-{ts}.db")
+
+        # WAL checkpoint for consistency
+        print("Checkpointing WAL...")
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+
+        # Copy main database file
+        shutil.copy2(str(db_path), str(output_path))
+        print(f"Backed up database to {output_path}")
+
+        # Copy WAL and SHM if present
+        wal_path = Path(str(db_path) + "-wal")
+        shm_path = Path(str(db_path) + "-shm")
+        if wal_path.exists():
+            shutil.copy2(str(wal_path), str(output_path) + "-wal")
+            print(f"  Copied WAL: {wal_path}")
+        if shm_path.exists():
+            shutil.copy2(str(shm_path), str(output_path) + "-shm")
+            print(f"  Copied SHM: {shm_path}")
+
+        return 0
+    except Exception as e:
+        print(f"Error creating backup: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    """Restore the Ariadne database from a backup file.
+
+    Optionally creates a safety backup of the current DB first,
+    then verifies the restored DB by counting memories.
+    """
+    try:
+        source_path = Path(args.source)
+        if not source_path.exists():
+            print(f"Backup file not found: {source_path}", file=sys.stderr)
+            return 1
+
+        db_path = Path(args.db_path)
+
+        # Safety backup of current DB (unless --no-safety-backup)
+        if not args.no_safety_backup and db_path.exists():
+            ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+            safety_path = Path(f"arriadne-safety-{ts}.db")
+            shutil.copy2(str(db_path), str(safety_path))
+            # Copy WAL/SHM if present
+            wal = Path(str(db_path) + "-wal")
+            shm = Path(str(db_path) + "-shm")
+            if wal.exists():
+                shutil.copy2(str(wal), str(safety_path) + "-wal")
+            if shm.exists():
+                shutil.copy2(str(shm), str(safety_path) + "-shm")
+            print(f"Safety backup created: {safety_path}")
+
+        # Stop any existing connections by closing current memory
+        if db_path.exists():
+            try:
+                config = AriadneConfig(db_path=args.db_path)
+                mem = AriadneMemory(config=config)
+                mem.close()
+            except Exception:
+                pass  # Best effort close
+
+        # Remove current DB files
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(str(db_path) + suffix)
+            if p.exists():
+                p.unlink()
+
+        # Copy backup files to target location
+        shutil.copy2(str(source_path), str(db_path))
+        for ext in ("-wal", "-shm"):
+            src = Path(str(source_path) + ext)
+            dst = Path(str(db_path) + ext)
+            if src.exists():
+                shutil.copy2(str(src), str(dst))
+
+        print(f"Restored database from {source_path}")
+
+        # Verify restored DB by counting memories
+        try:
+            config = AriadneConfig(db_path=args.db_path)
+            mem = AriadneMemory(config=config)
+            stats = mem.stats()
+            count = stats.get("active_memories", 0)
+            mem.close()
+            print(f"Verified: restored database contains {count} active memories")
+        except Exception as e:
+            print(f"Warning: Could not verify restored database: {e}", file=sys.stderr)
+
+        return 0
+    except Exception as e:
+        print(f"Error restoring backup: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     """Export all memories as JSON."""
     try:
@@ -419,6 +539,16 @@ def main(argv: list[str] | None = None) -> int:
     # maintain
     subparsers.add_parser("maintain", help="Run maintenance (consolidate + evict + prune)")
 
+    # backup
+    backup_parser = subparsers.add_parser("backup", help="Create a consistent database backup")
+    backup_parser.add_argument("-o", "--output", help="Output backup file path (default: arriadne-backup-TIMESTAMP.db)")
+
+    # restore
+    restore_parser = subparsers.add_parser("restore", help="Restore database from a backup")
+    restore_parser.add_argument("source", help="Path to backup file")
+    restore_parser.add_argument("--no-safety-backup", action="store_true",
+                                help="Skip creating a safety backup before restoring")
+
     # dashboard
     dash_parser = subparsers.add_parser("dashboard", help="Launch web dashboard")
     dash_parser.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
@@ -450,6 +580,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_import(args)
         case "maintain":
             return cmd_maintain(args)
+        case "backup":
+            return cmd_backup(args)
+        case "restore":
+            return cmd_restore(args)
         case "dashboard":
             return cmd_dashboard(args)
         case _:

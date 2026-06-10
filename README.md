@@ -154,17 +154,59 @@ fuller harness.
 
 ## Hermes Agent Integration
 
-Ariadne works as a drop-in memory provider for [Hermes Agent](https://hermes-agent.nousresearch.com/).
+Ariadne works as a drop-in memory provider for [Hermes Agent](https://hermes-agent.nousresearch.com/),
+giving your agent durable hybrid search memory with zero infrastructure.
+
+### Plugin Setup
 
 ```bash
-# Copy plugin
 git clone https://github.com/kyssta-exe/Ariadne.git /tmp/ariadne-repo
 cp -r /tmp/ariadne-repo/plugin ~/.hermes/plugins/ariadne
+```
 
-# Switch provider
+Then configure Hermes to use Ariadne:
+
+```bash
 hermes config set memory.provider ariadne
 hermes restart
 ```
+
+Alternatively, set the provider in `~/.hermes/config.yaml`:
+
+```yaml
+memory:
+  provider: ariadne
+```
+
+The plugin automatically creates its database at `~/.hermes/ariadne/memory.db`
+(plus a shared surface at `~/.hermes/ariadne/shared/memory.db` for cross-agent
+memory).
+
+### Available Tools
+
+The plugin exposes these `ariadne_*` tools to Hermes:
+
+| Tool | Description |
+|------|-------------|
+| `ariadne_remember` | Store a durable memory (fact, preference, insight, etc.) |
+| `ariadne_recall` | Hybrid search — FTS5 text + FAISS vector ranking |
+| `ariadne_stats` | Return memory system statistics |
+| `ariadne_forget` | Permanently delete a memory by ID |
+| `ariadne_update` | Update content or importance of an existing memory |
+| `ariadne_invalidate` | Soft-delete (mark as superseded) a memory |
+| `ariadne_export` | Export all memories to a JSON file |
+| `ariadne_import` | Import memories from a JSON file |
+| `ariadne_graph_query` | Traverse the knowledge graph from a seed entity |
+| `ariadne_graph_link` | Declare a relationship between two entities |
+| `ariadne_sleep` | Run memory consolidation (compress old working memories) |
+| `ariadne_diagnose` | Run diagnostics on the Ariadne installation |
+| `ariadne_scratchpad_write` | Write a temporary note to the scratchpad |
+| `ariadne_scratchpad_read` | Read scratchpad entries |
+| `ariadne_scratchpad_clear` | Clear all scratchpad entries |
+| `ariadne_shared_remember` | Store a memory in the shared surface DB (cross-agent) |
+| `ariadne_shared_recall` | Search the shared surface DB |
+| `ariadne_shared_forget` | Delete a shared surface memory |
+| `ariadne_shared_stats` | Return shared surface DB stats |
 
 Full guide: [ariadne.mantes.net/guide/hermes](https://ariadne.mantes.net/guide/hermes)
 
@@ -199,6 +241,70 @@ mem = AriadneMemory(config=config)
 - [Knowledge Graph](https://ariadne.mantes.net/guide/graph)
 - [API Reference](https://ariadne.mantes.net/api/)
 - [Benchmarks](https://ariadne.mantes.net/benchmarks)
+
+---
+
+## Backup & Restore
+
+Ariadne supports full database backup and restore through the CLI, the web
+dashboard, and the Python API. Backups are consistent SQLite snapshots (WAL
+checkpoint + file copy) — no daemon restart required.
+
+### CLI Commands
+
+```bash
+# Create a timestamped backup (default: arriadne-backup-YYYYMMDDTHHMMSS.db)
+ariadne backup
+
+# Backup to a specific file
+ariadne backup -o /backups/my-memory.db
+
+# Restore from a backup (creates a safety backup of the current DB first)
+ariadne restore /backups/my-memory.db
+
+# Restore without safety backup
+ariadne restore /backups/my-memory.db --no-safety-backup
+
+# Export all memories as JSON (to stdout or a file)
+ariadne export
+ariadne export -o memories.json
+
+# Import memories from a JSON file
+ariadne import memories.json
+```
+
+### Dashboard UI
+
+Launch the dashboard and use the backup/restore controls:
+
+```bash
+ariadne dashboard
+```
+
+The dashboard exposes two endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/backup` | `GET` | Download the current database as a `.db` file |
+| `/api/restore` | `POST` | Upload a `.db` file to restore (creates a safety backup automatically) |
+
+### Python API
+
+```python
+from arriadne import AriadneMemory, AriadneConfig
+
+mem = AriadneMemory(config=AriadneConfig(db_path="memory.db"))
+
+# Export all memories to a dict
+data = mem.export_json()
+# data contains {"memories": [...], "stats": {...}}
+
+# Import from a previously exported dict
+imported_count = mem.import_json(data)
+print(f"Imported {imported_count} memories")
+
+mem.close()
+```
 
 ---
 
