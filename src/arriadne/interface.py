@@ -72,14 +72,20 @@ class AriadneMemory:
                 )
 
         self._db = AriadneDB(config)
-        self._dedup = Deduplicator(
-            threshold=config.dedup_threshold,
-            num_perm=config.dedup_num_perm,
-        )
+        self._dedup_by_namespace: dict[str, Deduplicator] = {}
         self._contradiction_detector = ContradictionDetector()
         self._db.open()
         self._load_dedup_from_db()
         logger.info("AriadneMemory initialized (db=%s)", config.db_path)
+
+    def _dedup_for(self, namespace: str) -> Deduplicator:
+        """Return the near-duplicate index for one namespace."""
+        if namespace not in self._dedup_by_namespace:
+            self._dedup_by_namespace[namespace] = Deduplicator(
+                threshold=self._config.dedup_threshold,
+                num_perm=self._config.dedup_num_perm,
+            )
+        return self._dedup_by_namespace[namespace]
 
     def _load_dedup_from_db(self) -> None:
         """Rebuild the in-memory MinHash dedup index from stored memories.
@@ -90,16 +96,17 @@ class AriadneMemory:
         """
         try:
             cursor = self._db.conn.execute(
-                "SELECT id, content FROM memories WHERE is_deleted = 0"
+                "SELECT id, content, namespace FROM memories WHERE is_deleted = 0"
             )
             count = 0
             for row in cursor.fetchall():
-                self._dedup.add(row[1], doc_id=str(row[0]))
+                self._dedup_for(row[2]).add(row[1], doc_id=str(row[0]))
                 count += 1
             if count:
                 logger.info("Loaded %d memories into dedup index", count)
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Failed to load dedup index from DB: %s", e)
+
 
     def close(self) -> None:
         """Close the memory system, saving all state."""
@@ -120,6 +127,12 @@ class AriadneMemory:
         entities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        namespace: str = "default",
+        scope: str = "session",
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         """Remember something by storing it in memory.
 
@@ -145,13 +158,14 @@ class AriadneMemory:
         try:
             with self._lock:
                 # Check for contradictions with existing memories
-                contradictions = self._check_contradictions(content)
+                contradictions = self._check_contradictions(content, namespace=namespace)
                 if contradictions:
                     result["contradictions"] = contradictions
 
                 # Check dedup (MinHash near-duplicate detection)
-                if self._dedup.is_duplicate(content):
-                    duplicates = self._dedup.find_duplicates(content)
+                dedup = self._dedup_for(namespace)
+                if dedup.is_duplicate(content):
+                    duplicates = dedup.find_duplicates(content)
                     if duplicates:
                         result["memory_id"] = None
                         result["status"] = "duplicate"
@@ -182,6 +196,12 @@ class AriadneMemory:
                     entities=canonical_entities,
                     metadata=metadata,
                     tags=tags,
+                    namespace=namespace,
+                    scope=scope,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    project_id=project_id,
                 )
 
                 memory_id = storage_result["memory_id"]
@@ -190,7 +210,7 @@ class AriadneMemory:
 
                 # Add to dedup index
                 if storage_result["status"] == "created":
-                    self._dedup.add(content, doc_id=str(memory_id))
+                    dedup.add(content, doc_id=str(memory_id))
 
             logger.info(
                 "Remember: id=%s status=%s type=%s",
@@ -204,7 +224,9 @@ class AriadneMemory:
             result["error"] = str(e)
             return result
 
-    def _check_contradictions(self, content: str) -> list[dict[str, Any]]:
+    def _check_contradictions(
+        self, content: str, namespace: str = "default"
+    ) -> list[dict[str, Any]]:
         """Check if new content contradicts existing memories.
 
         Args:
@@ -215,7 +237,7 @@ class AriadneMemory:
         """
         try:
             # Get recent memories to check against
-            results = self._db.fts_search(content, k=5)
+            results = self._db.fts_search(content, k=5, namespace=namespace)
             contradictions = []
             for mem in results:
                 if mem.get("is_deleted"):
@@ -239,6 +261,7 @@ class AriadneMemory:
         type_filter: str | None = None,
         time_range: tuple[float, float] | None = None,
         importance_min: float | None = None,
+        namespace: str = "default",
     ) -> list[dict[str, Any]]:
         """Recall memories matching a query.
 
@@ -266,9 +289,11 @@ class AriadneMemory:
                 emb_array = np.asarray(embedding, dtype=np.float32)
 
             if emb_array is not None:
-                results = self._db.hybrid_search(query, embedding=emb_array, k=k * 3)
+                results = self._db.hybrid_search(
+                    query, embedding=emb_array, k=k * 3, namespace=namespace
+                )
             else:
-                results = self._db.fts_search(query, k=k * 3)
+                results = self._db.fts_search(query, k=k * 3, namespace=namespace)
 
             # Apply filters
             filtered = []
@@ -318,7 +343,8 @@ class AriadneMemory:
                 result = self._db.delete_memory(memory_id, hard=hard)
                 # Remove from dedup index only once the delete actually happened
                 if result:
-                    self._dedup.remove(str(memory_id))
+                    for dedup in self._dedup_by_namespace.values():
+                        dedup.remove(str(memory_id))
             logger.info("Forget: id=%d hard=%s result=%s", memory_id, hard, result)
             return result
         except Exception as e:
@@ -368,8 +394,11 @@ class AriadneMemory:
 
                 # Update dedup index if content changed
                 if result and content is not None:
-                    self._dedup.remove(str(memory_id))
-                    self._dedup.add(content, doc_id=str(memory_id))
+                    existing = self._db.get_memory(memory_id)
+                    namespace = existing.get("namespace", "default") if existing else "default"
+                    dedup = self._dedup_for(namespace)
+                    dedup.remove(str(memory_id))
+                    dedup.add(content, doc_id=str(memory_id))
 
             logger.info("Update: id=%d result=%s", memory_id, result)
             return result
@@ -429,7 +458,9 @@ class AriadneMemory:
         """
         try:
             db_stats = self._db.stats()
-            db_stats["dedup_index_size"] = self._dedup.size
+            db_stats["dedup_index_size"] = sum(
+                dedup.size for dedup in self._dedup_by_namespace.values()
+            )
             return db_stats
         except Exception as e:
             logger.error("Error getting stats: %s", e)
@@ -446,10 +477,7 @@ class AriadneMemory:
             # Consolidation retires originals and adds merged memories; resync the
             # in-memory dedup index so it reflects what is actually active.
             if count:
-                self._dedup = Deduplicator(
-                    threshold=self._config.dedup_threshold,
-                    num_perm=self._config.dedup_num_perm,
-                )
+                self._dedup_by_namespace = {}
                 self._load_dedup_from_db()
             return count
 
@@ -512,7 +540,8 @@ class AriadneMemory:
     ) -> list[dict[str, Any]]:
         """Add multiple memories efficiently in a single transaction.
 
-        Each item supports: content, memory_type, importance, entities, metadata, tags.
+        Each item supports: content, memory_type, importance, entities, metadata, tags,
+        namespace, scope, user_id, agent_id, session_id, project_id.
 
         Returns:
             List of result dicts per item.
@@ -543,7 +572,9 @@ class AriadneMemory:
             # returns one result per item, in order, so pair them positionally.
             for item, res in zip(items, results):
                 if res["status"] == "created" and item.get("content"):
-                    self._dedup.add(item["content"], doc_id=str(res["memory_id"]))
+                    self._dedup_for(item.get("namespace", "default")).add(
+                        item["content"], doc_id=str(res["memory_id"])
+                    )
 
             self._maybe_maintain()
             return results
@@ -556,9 +587,6 @@ class AriadneMemory:
         """Import from a previously exported JSON dict. Returns count imported."""
         count = self._db.import_all(data)
         # Rebuild dedup index
-        self._dedup = Deduplicator(
-            threshold=self._config.dedup_threshold,
-            num_perm=self._config.dedup_num_perm,
-        )
+        self._dedup_by_namespace = {}
         self._load_dedup_from_db()
         return count

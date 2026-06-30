@@ -2,6 +2,19 @@
 
 All notable changes to Ariadne will be documented in this file.
 
+## [0.12.0] - 2026-06-30
+
+### Added
+- First-class memory namespace and scope fields for local/project/session isolation.
+- Namespace-aware exact duplicate detection, MinHash near-duplicate detection, FTS search, vector search, and hybrid search.
+- Storage metadata fields for `user_id`, `agent_id`, `session_id`, and `project_id`.
+- In-place SQLite migrations and indexes for namespace/scope metadata.
+- Hermes plugin namespace support for `ariadne_remember`, `ariadne_recall`, session prefetch, sync-turn memories, and shared memory.
+
+### Changed
+- Export/import and bulk memory insertion now preserve namespace/scope metadata.
+- Memory stats aggregate per-namespace dedup indexes.
+
 ## [0.10.0] - 2026-06-10
 
 ### Added

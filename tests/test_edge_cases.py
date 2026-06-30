@@ -120,6 +120,29 @@ class TestEmptyDB:
         results = empty_mem._db.fts_search("anything", k=5)
         assert results == []
 
+    def test_recall_filters_by_namespace(self, empty_mem: AriadneMemory) -> None:
+        """AriadneMemory recall should not leak memories across namespaces."""
+        empty_mem.remember("alpha-only deploy note", namespace="alpha")
+        empty_mem.remember("beta-only deploy note", namespace="beta")
+
+        alpha = empty_mem.recall("deploy note", namespace="alpha", k=10)
+        beta = empty_mem.recall("deploy note", namespace="beta", k=10)
+
+        assert [m["namespace"] for m in alpha] == ["alpha"]
+        assert [m["namespace"] for m in beta] == ["beta"]
+
+    def test_near_duplicate_detection_is_namespace_scoped(
+        self, empty_mem: AriadneMemory
+    ) -> None:
+        """Same content is allowed in separate namespaces via the interface."""
+        first = empty_mem.remember("same durable note", namespace="alpha")
+        second = empty_mem.remember("same durable note", namespace="beta")
+        third = empty_mem.remember("same durable note", namespace="alpha")
+
+        assert first["status"] == "created"
+        assert second["status"] == "created"
+        assert third["status"] == "duplicate"
+
     def test_stats_does_not_crash(self, empty_mem: AriadneMemory) -> None:
         """stats() on empty DB returns a dict (may contain error due to
         indentation bug in source; the interface catches it gracefully)."""

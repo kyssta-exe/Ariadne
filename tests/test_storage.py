@@ -111,6 +111,15 @@ class TestMemoryCRUD:
         assert r2["status"] == "duplicate"
         assert r1["memory_id"] == r2["memory_id"]
 
+    def test_duplicate_hash_is_scoped_by_namespace(self, db: AriadneDB) -> None:
+        """Identical content in different namespaces is not a duplicate."""
+        r1 = db.add_memory("Shared wording", namespace="project-a")
+        r2 = db.add_memory("Shared wording", namespace="project-b")
+
+        assert r1["status"] == "created"
+        assert r2["status"] == "created"
+        assert r1["memory_id"] != r2["memory_id"]
+
     def test_get_memory(self, db: AriadneDB) -> None:
         result = db.add_memory("Test content", importance=0.8)
         # get_memory is a pure read now — it does NOT bump access_count.
@@ -118,6 +127,8 @@ class TestMemoryCRUD:
         assert memory is not None
         assert memory["content"] == "Test content"
         assert memory["importance"] == 0.8
+        assert memory["namespace"] == "default"
+        assert memory["scope"] == "session"
         assert memory["access_count"] == 0  # pure read, no mutation
 
         # Access is recorded explicitly via touch.
@@ -125,6 +136,38 @@ class TestMemoryCRUD:
         memory = db.get_memory(result["memory_id"])
         assert memory is not None
         assert memory["access_count"] == 1
+
+    def test_add_memory_stores_namespace_scope_and_ids(self, db: AriadneDB) -> None:
+        result = db.add_memory(
+            "Namespaced content",
+            namespace="org/user/project",
+            scope="project",
+            user_id="user-1",
+            agent_id="agent-1",
+            session_id="session-1",
+            project_id="project-1",
+        )
+
+        memory = db.get_memory(result["memory_id"])
+
+        assert memory is not None
+        assert memory["namespace"] == "org/user/project"
+        assert memory["scope"] == "project"
+        assert memory["user_id"] == "user-1"
+        assert memory["agent_id"] == "agent-1"
+        assert memory["session_id"] == "session-1"
+        assert memory["project_id"] == "project-1"
+
+    def test_fts_search_filters_by_namespace(self, db: AriadneDB) -> None:
+        db.add_memory("deploy secret only in project alpha", namespace="alpha")
+        db.add_memory("deploy secret only in project beta", namespace="beta")
+
+        alpha = db.fts_search("deploy secret", k=10, namespace="alpha")
+        beta = db.fts_search("deploy secret", k=10, namespace="beta")
+
+        assert [m["namespace"] for m in alpha] == ["alpha"]
+        assert [m["namespace"] for m in beta] == ["beta"]
+        assert alpha[0]["id"] != beta[0]["id"]
 
     def test_get_nonexistent(self, db: AriadneDB) -> None:
         assert db.get_memory(99999) is None

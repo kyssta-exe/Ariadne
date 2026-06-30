@@ -126,7 +126,7 @@ class AriadneMemoryProvider(MemoryProvider):
             return self._format_recall_block(self._prefetch_cache)
 
         try:
-            results = self._ariadne.recall(query, k=_MAX_PREFETCH_RESULTS)
+            results = self._ariadne.recall(query, k=_MAX_PREFETCH_RESULTS, namespace="session")
             if results:
                 self._prefetch_cache = results
                 self._prefetch_timestamp = time.time()
@@ -141,7 +141,9 @@ class AriadneMemoryProvider(MemoryProvider):
         if not self._ariadne or not query.strip():
             return
         try:
-            self._prefetch_cache = self._ariadne.recall(query, k=_MAX_PREFETCH_RESULTS)
+            self._prefetch_cache = self._ariadne.recall(
+                query, k=_MAX_PREFETCH_RESULTS, namespace="session"
+            )
             self._prefetch_timestamp = time.time()
         except Exception:
             pass
@@ -165,7 +167,10 @@ class AriadneMemoryProvider(MemoryProvider):
                     content=f"[USER] {user_content[:500]}",
                     memory_type="episodic",
                     importance=0.3,
-                    metadata={"source": "sync_turn"},
+                    metadata={"source": "sync_turn", "session_id": session_id or self._session_id},
+                    namespace="session",
+                    scope="session",
+                    session_id=session_id or self._session_id or None,
                 )
             except Exception:
                 pass
@@ -177,7 +182,10 @@ class AriadneMemoryProvider(MemoryProvider):
                     content=f"[ASSISTANT] {assistant_content[:500]}",
                     memory_type="episodic",
                     importance=0.2,
-                    metadata={"source": "sync_turn"},
+                    metadata={"source": "sync_turn", "session_id": session_id or self._session_id},
+                    namespace="session",
+                    scope="session",
+                    session_id=session_id or self._session_id or None,
                 )
             except Exception:
                 pass
@@ -206,6 +214,7 @@ class AriadneMemoryProvider(MemoryProvider):
                         "importance": {"type": "number", "description": "Importance 0.0-1.0. Default 0.5.", "default": 0.5},
                         "source": {"type": "string", "description": "Source tag: preference, fact, insight, identity, task, etc.", "default": "user"},
                         "scope": {"type": "string", "description": "'session' (default) or 'global'.", "default": "session"},
+                        "namespace": {"type": "string", "description": "Isolation namespace. Defaults to scope, e.g. session/project/global.", "default": "session"},
                         "memory_type": {"type": "string", "description": "semantic, episodic, or procedural", "default": "semantic"},
                     },
                     "required": ["content"],
@@ -219,6 +228,7 @@ class AriadneMemoryProvider(MemoryProvider):
                     "properties": {
                         "query": {"type": "string", "description": "Natural language query."},
                         "limit": {"type": "integer", "description": "Max results. Default 5.", "default": 5},
+                        "namespace": {"type": "string", "description": "Namespace to search. Defaults to 'session'.", "default": "session"},
                     },
                     "required": ["query"],
                 },
@@ -432,10 +442,21 @@ class AriadneMemoryProvider(MemoryProvider):
     # ── Tool handlers ─────────────────────────────────────────────────
 
     def _handle_remember(self, args: Dict) -> str:
+        scope = args.get("scope", "session")
+        namespace = args.get("namespace") or scope
+        metadata = {
+            "source": args.get("source", "user"),
+            "scope": scope,
+            "session_id": self._session_id,
+        }
         result = self._ariadne.remember(
             content=args["content"],
             memory_type=args.get("memory_type", "semantic"),
             importance=args.get("importance", 0.5),
+            metadata=metadata,
+            namespace=namespace,
+            scope=scope,
+            session_id=self._session_id or None,
         )
         return json.dumps(result)
 
@@ -443,6 +464,7 @@ class AriadneMemoryProvider(MemoryProvider):
         results = self._ariadne.recall(
             query=args["query"],
             k=args.get("limit", 5),
+            namespace=args.get("namespace", "session"),
         )
         return json.dumps(self._simplify_results(results))
 
@@ -492,6 +514,13 @@ class AriadneMemoryProvider(MemoryProvider):
                     content=m["content"],
                     memory_type=m.get("type", "semantic"),
                     importance=m.get("importance", 0.5),
+                    metadata=m.get("metadata"),
+                    namespace=m.get("namespace", "default"),
+                    scope=m.get("scope", "session"),
+                    user_id=m.get("user_id"),
+                    agent_id=m.get("agent_id"),
+                    session_id=m.get("session_id"),
+                    project_id=m.get("project_id"),
                 )
                 if result.get("status") == "created":
                     imported += 1
@@ -566,6 +595,9 @@ class AriadneMemoryProvider(MemoryProvider):
             content=args["content"],
             memory_type="semantic",
             importance=args.get("importance", 0.8),
+            metadata={"kind": args.get("kind", "meta"), "source": "shared"},
+            namespace="shared",
+            scope="global",
         )
         return json.dumps(result)
 
@@ -575,6 +607,7 @@ class AriadneMemoryProvider(MemoryProvider):
         results = self._shared.recall(
             query=args["query"],
             k=args.get("limit", 5),
+            namespace="shared",
         )
         return json.dumps(self._simplify_results(results))
 
@@ -601,6 +634,8 @@ class AriadneMemoryProvider(MemoryProvider):
                 "id": r.get("id"),
                 "content": r.get("content", "")[:300],
                 "memory_type": r.get("memory_type", ""),
+                "namespace": r.get("namespace", "default"),
+                "scope": r.get("scope", "session"),
                 "importance": r.get("importance", 0.5),
                 "score": r.get("score", 0),
                 "search_type": r.get("search_type", ""),

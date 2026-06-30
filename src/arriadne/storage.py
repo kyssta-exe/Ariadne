@@ -237,7 +237,13 @@ class AriadneDB:
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 deleted_at REAL,
                 metadata TEXT,
-                tags TEXT DEFAULT '[]'
+                tags TEXT DEFAULT '[]',
+                namespace TEXT NOT NULL DEFAULT 'default',
+                scope TEXT NOT NULL DEFAULT 'session',
+                user_id TEXT,
+                agent_id TEXT,
+                session_id TEXT,
+                project_id TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_content_hash
@@ -250,6 +256,18 @@ class AriadneDB:
                 ON memories(is_deleted);
             CREATE INDEX IF NOT EXISTS idx_memories_created
                 ON memories(created_at);
+            CREATE INDEX IF NOT EXISTS idx_memories_namespace
+                ON memories(namespace);
+            CREATE INDEX IF NOT EXISTS idx_memories_scope
+                ON memories(scope);
+            CREATE INDEX IF NOT EXISTS idx_memories_user
+                ON memories(user_id);
+            CREATE INDEX IF NOT EXISTS idx_memories_agent
+                ON memories(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_memories_session
+                ON memories(session_id);
+            CREATE INDEX IF NOT EXISTS idx_memories_project
+                ON memories(project_id);
 
             CREATE TABLE IF NOT EXISTS entities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -357,12 +375,23 @@ class AriadneDB:
             END;
         """)
 
-        # Migration: add tags column for existing databases
+        # Migrations for existing databases. SQLite allows ADD COLUMN with
+        # constants/defaults, so older single-file DBs upgrade in place.
         cursor.execute("PRAGMA table_info(memories)")
         cols = {row[1] for row in cursor.fetchall()}
-        if "tags" not in cols:
-            cursor.execute("ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT '[]'")
-            logger.info("Added 'tags' column to memories table (migration)")
+        migrations = {
+            "tags": "ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT '[]'",
+            "namespace": "ALTER TABLE memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'",
+            "scope": "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'session'",
+            "user_id": "ALTER TABLE memories ADD COLUMN user_id TEXT",
+            "agent_id": "ALTER TABLE memories ADD COLUMN agent_id TEXT",
+            "session_id": "ALTER TABLE memories ADD COLUMN session_id TEXT",
+            "project_id": "ALTER TABLE memories ADD COLUMN project_id TEXT",
+        }
+        for col, ddl in migrations.items():
+            if col not in cols:
+                cursor.execute(ddl)
+                logger.info("Added %r column to memories table (migration)", col)
 
         self._commit()
         logger.debug("Schema created/verified")
@@ -482,6 +511,12 @@ class AriadneDB:
         entities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        namespace: str = "default",
+        scope: str = "session",
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         """Add a new memory to the database.
 
@@ -503,8 +538,9 @@ class AriadneDB:
 
             # Dedup check
             cursor = self._conn.execute(
-                "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
-                (content_hash,),
+                """SELECT id FROM memories
+                   WHERE content_hash = ? AND namespace = ? AND is_deleted = 0""",
+                (content_hash, namespace),
             )
             existing = cursor.fetchone()
             if existing is not None:
@@ -525,10 +561,12 @@ class AriadneDB:
                 """INSERT INTO memories
                    (content, content_hash, memory_type, importance, embedding,
                     created_at, updated_at, accessed_at, access_count,
-                    retention_strength, is_deleted, metadata, tags)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?)""",
+                    retention_strength, is_deleted, metadata, tags, namespace,
+                    scope, user_id, agent_id, session_id, project_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (content, content_hash, memory_type, importance, embedding_blob,
-                 now, now, now, metadata_json, tags_json),
+                 now, now, now, metadata_json, tags_json, namespace, scope,
+                 user_id, agent_id, session_id, project_id),
             )
             memory_id = cursor.lastrowid
             assert memory_id is not None
@@ -590,11 +628,18 @@ class AriadneDB:
                 importance = _clamp01(mem.get("importance", 0.5))
                 content_hash = _hash_content(content)
                 memory_type = mem.get("memory_type", "semantic")
+                namespace = mem.get("namespace", "default")
+                scope = mem.get("scope", "session")
+                user_id = mem.get("user_id")
+                agent_id = mem.get("agent_id")
+                session_id = mem.get("session_id")
+                project_id = mem.get("project_id")
 
                 # Dedup check
                 cursor = self._conn.execute(
-                    "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
-                    (content_hash,),
+                    """SELECT id FROM memories
+                       WHERE content_hash = ? AND namespace = ? AND is_deleted = 0""",
+                    (content_hash, namespace),
                 )
                 existing = cursor.fetchone()
                 if existing is not None:
@@ -615,10 +660,12 @@ class AriadneDB:
                     """INSERT INTO memories
                        (content, content_hash, memory_type, importance, embedding,
                         created_at, updated_at, accessed_at, access_count,
-                        retention_strength, is_deleted, metadata, tags)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?)""",
+                        retention_strength, is_deleted, metadata, tags, namespace,
+                        scope, user_id, agent_id, session_id, project_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1.0, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (content, content_hash, memory_type, importance, embedding_blob,
-                     now, now, now, metadata_json, tags_json),
+                     now, now, now, metadata_json, tags_json, namespace, scope,
+                     user_id, agent_id, session_id, project_id),
                 )
                 memory_id = cursor.lastrowid
                 assert memory_id is not None
@@ -668,7 +715,8 @@ class AriadneDB:
         for row in self._conn.execute(
             """SELECT id, content, content_hash, memory_type, importance,
                       created_at, updated_at, accessed_at, access_count,
-                      retention_strength, metadata, tags, embedding
+                      retention_strength, metadata, tags, embedding, namespace,
+                      scope, user_id, agent_id, session_id, project_id
                FROM memories WHERE is_deleted = 0 ORDER BY id"""
         ).fetchall():
             mem = {
@@ -688,6 +736,12 @@ class AriadneDB:
                     np.frombuffer(row[12], dtype=np.float32).tolist()
                     if row[12] is not None else None
                 ),
+                "namespace": row[13],
+                "scope": row[14],
+                "user_id": row[15],
+                "agent_id": row[16],
+                "session_id": row[17],
+                "project_id": row[18],
             }
             # Get entities for this memory
             entity_rows = self._conn.execute(
@@ -730,9 +784,12 @@ class AriadneDB:
                 content = mem.get("content", "")
                 content_hash = _hash_content(content)
                 old_id = mem.get("id")
+                namespace = mem.get("namespace", "default")
+                scope = mem.get("scope", "session")
                 cursor = self._conn.execute(
-                    "SELECT id FROM memories WHERE content_hash = ? AND is_deleted = 0",
-                    (content_hash,),
+                    """SELECT id FROM memories
+                       WHERE content_hash = ? AND namespace = ? AND is_deleted = 0""",
+                    (content_hash, namespace),
                 )
                 existing = cursor.fetchone()
                 if existing is not None:
@@ -762,13 +819,16 @@ class AriadneDB:
                     """INSERT INTO memories
                        (content, content_hash, memory_type, importance, embedding,
                         created_at, updated_at, accessed_at, access_count,
-                        retention_strength, metadata, tags)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        retention_strength, metadata, tags, namespace, scope,
+                        user_id, agent_id, session_id, project_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (content, content_hash,
                      mem.get("memory_type", "semantic"), importance, embedding_blob,
                      mem.get("created_at", now), now,
                      mem.get("accessed_at", now), mem.get("access_count", 0),
-                     mem.get("retention_strength", 1.0), metadata_json, tags_json),
+                     mem.get("retention_strength", 1.0), metadata_json, tags_json,
+                     namespace, scope, mem.get("user_id"), mem.get("agent_id"),
+                     mem.get("session_id"), mem.get("project_id")),
                 )
                 memory_id = cursor.lastrowid
                 assert memory_id is not None
@@ -853,7 +913,8 @@ class AriadneDB:
             cursor = self._conn.execute(
                 """SELECT id, content, content_hash, memory_type, importance,
                           created_at, updated_at, accessed_at, access_count,
-                          retention_strength, is_deleted, metadata, tags
+                          retention_strength, is_deleted, metadata, tags, namespace,
+                          scope, user_id, agent_id, session_id, project_id
                    FROM memories WHERE id = ?""",
                 (memory_id,),
             )
@@ -875,6 +936,12 @@ class AriadneDB:
                 "is_deleted": bool(row[10]),
                 "metadata": json.loads(row[11]) if row[11] else None,
                 "tags": json.loads(row[12]) if row[12] else [],
+                "namespace": row[13],
+                "scope": row[14],
+                "user_id": row[15],
+                "agent_id": row[16],
+                "session_id": row[17],
+                "project_id": row[18],
             }
         except sqlite3.Error as e:
             logger.error("Database error getting memory %d: %s", memory_id, e)
@@ -1052,7 +1119,7 @@ class AriadneDB:
 
     @_synchronized
     def vector_search(
-        self, embedding: np.ndarray, k: int = 10
+        self, embedding: np.ndarray, k: int = 10, namespace: str | None = None
     ) -> list[dict[str, Any]]:
         """Search memories by vector similarity (cosine).
 
@@ -1070,8 +1137,8 @@ class AriadneDB:
         try:
             emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
             vec = emb.reshape(1, -1)
-            k = min(k, self._faiss_index.ntotal)
-            distances, indices = self._faiss_index.search(vec, k)
+            requested_k = min(self._faiss_index.ntotal, self._faiss_index.ntotal if namespace else k)
+            distances, indices = self._faiss_index.search(vec, requested_k)
 
             results = []
             for dist, idx in zip(distances[0], indices[0]):
@@ -1080,9 +1147,13 @@ class AriadneDB:
                 # With IndexIDMap2 the returned label is the memory's own id.
                 memory = self.get_memory(int(idx))
                 if memory is not None and not memory["is_deleted"]:
+                    if namespace is not None and memory.get("namespace") != namespace:
+                        continue
                     memory["score"] = float(dist)
                     memory["search_type"] = "vector"
                     results.append(memory)
+                    if len(results) >= k:
+                        break
             return results
 
         except Exception as e:
@@ -1146,7 +1217,7 @@ class AriadneDB:
             return [[] for _ in range(len(query_embeddings))]
 
     @_synchronized
-    def fts_search(self, query: str, k: int = 10) -> list[dict[str, Any]]:
+    def fts_search(self, query: str, k: int = 10, namespace: str | None = None) -> list[dict[str, Any]]:
         """Search memories by full-text keyword matching.
 
         Args:
@@ -1164,13 +1235,26 @@ class AriadneDB:
             rows: list[Any] = []
             for op in ("AND", "OR"):
                 fts_query = _fts_escape(query, op=op)
-                cursor = self._conn.execute(
-                    """SELECT rowid, rank FROM memories_fts
-                       WHERE memories_fts MATCH ?
-                       ORDER BY rank
-                       LIMIT ?""",
-                    (fts_query, k),
-                )
+                if namespace is None:
+                    cursor = self._conn.execute(
+                        """SELECT rowid, rank FROM memories_fts
+                           WHERE memories_fts MATCH ?
+                           ORDER BY rank
+                           LIMIT ?""",
+                        (fts_query, k),
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        """SELECT f.rowid, f.rank
+                           FROM memories_fts AS f
+                           JOIN memories AS m ON m.id = f.rowid
+                           WHERE memories_fts MATCH ?
+                             AND m.namespace = ?
+                             AND m.is_deleted = 0
+                           ORDER BY f.rank
+                           LIMIT ?""",
+                        (fts_query, namespace, k),
+                    )
                 rows = cursor.fetchall()
                 if rows:
                     break
@@ -1179,6 +1263,8 @@ class AriadneDB:
             for rowid, rank in rows:
                 memory = self.get_memory(int(rowid))
                 if memory is not None and not memory["is_deleted"]:
+                    if namespace is not None and memory.get("namespace") != namespace:
+                        continue
                     memory["score"] = abs(float(rank))
                     memory["search_type"] = "fts"
                     results.append(memory)
@@ -1195,6 +1281,7 @@ class AriadneDB:
         embedding: np.ndarray | None = None,
         k: int = 10,
         rrf_k: int = 60,
+        namespace: str | None = None,
     ) -> list[dict[str, Any]]:
         """Hybrid search combining vector and FTS results with Reciprocal Rank Fusion.
 
@@ -1211,10 +1298,10 @@ class AriadneDB:
         skip the RRF fusion step and return results directly from the non-empty source.
         This avoids unnecessary computation when one search modality finds nothing.
         """
-        fts_results = self.fts_search(query, k=k * 2)
+        fts_results = self.fts_search(query, k=k * 2, namespace=namespace)
         vector_results: list[dict[str, Any]] = []
         if embedding is not None:
-            vector_results = self.vector_search(embedding, k=k * 2)
+            vector_results = self.vector_search(embedding, k=k * 2, namespace=namespace)
 
         # Early termination optimization: skip RRF fusion if one side is empty
         if not fts_results and not vector_results:
