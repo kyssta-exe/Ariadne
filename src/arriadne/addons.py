@@ -25,7 +25,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, cast
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,10 @@ class AddonRegistry:
             try:
                 from importlib.metadata import entry_points
                 all_eps = entry_points()
-                eps = all_eps.get("ariadne.addons", [])  # type: ignore[arg-type]
+                if hasattr(all_eps, "select"):
+                    eps = all_eps.select(group="ariadne.addons")
+                else:
+                    eps = cast(Any, all_eps).get("ariadne.addons", [])
             except Exception as exc:
                 logger.error("Failed to load entry_points: %s", exc)
                 return found

@@ -2,6 +2,11 @@
 
 All notable changes to Ariadne will be documented in this file.
 
+## [0.12.1] - 2026-06-30
+
+### Fixed
+- CI mypy configuration now targets Python 3.12 to match the GitHub Actions runtime and installed NumPy stubs.
+
 ## [0.12.0] - 2026-06-30
 
 ### Added
