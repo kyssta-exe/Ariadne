@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install ruff mypy
-          pip install -e ".[dev]" --quiet || true
+          pip install -e ".[dev]"
 
       - name: Run Ruff (lint)
         run: ruff check src/ tests/

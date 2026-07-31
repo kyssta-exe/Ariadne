@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 # Hermes MemoryProvider ABC
 import sys
-_HERMES_AGENT = "/usr/local/lib/hermes-agent"
+_HERMES_AGENT = os.environ.get("HERMES_AGENT_HOME", "/usr/local/lib/hermes-agent")
 if _HERMES_AGENT not in sys.path:
     sys.path.insert(0, _HERMES_AGENT)
 from agent.memory_provider import MemoryProvider  # noqa: E402 — needs the sys.path insert above

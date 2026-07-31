@@ -4,7 +4,7 @@ Memory for AI agents. Local-first hybrid search + knowledge graph. Zero infrastr
 
 [![PyPI](https://img.shields.io/pypi/v/ariadne-memory.svg)](https://pypi.org/project/ariadne-memory/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-166%20passed-brightgreen)](https://github.com/kyssta-exe/Ariadne/actions)
+[![Tests](https://img.shields.io/badge/tests-171%20passed-brightgreen)](https://github.com/kyssta-exe/Ariadne/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---

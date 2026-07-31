@@ -78,6 +78,19 @@ class Deduplicator:
         """Tokenize text into lowercase words."""
         return re.findall(r"\w+", text.lower())
 
+    def _similarity(self, query: str, doc_id: str, query_hash: MinHash) -> float:
+        """Return a stable similarity score for LSH misses."""
+        minhash_score = query_hash.jaccard(self._minhashes[doc_id])
+        query_negated = bool(re.search(r"\b(?:not|no|never|cannot|can't|won't|isn't|aren't)\b", query.lower()))
+        doc_negated = bool(re.search(r"\b(?:not|no|never|cannot|can't|won't|isn't|aren't)\b", self._contents[doc_id].lower()))
+        if query_negated != doc_negated:
+            return 0.0
+        query_tokens = set(self._tokenize(query))
+        doc_tokens = set(self._tokenize(self._contents[doc_id]))
+        token_union = query_tokens | doc_tokens
+        token_score = len(query_tokens & doc_tokens) / len(token_union) if token_union else 0.0
+        return max(minhash_score, token_score)
+
     def _create_minhash(self, text: str) -> MinHash:
         """Create a MinHash for the given text."""
         m = MinHash(num_perm=self._num_perm)
@@ -154,8 +167,15 @@ class Deduplicator:
             True if a duplicate exists above the threshold.
         """
         m = self._create_minhash(content)
-        results = self._lsh.query(m)
-        return len(results) > 0
+        candidates = set(self._lsh.query(m))
+        # ponytail: scan only when LSH misses; correctness beats a rare false
+        # negative, and this fallback is acceptable for the in-memory index.
+        if not candidates:
+            candidates = set(self._minhashes)
+        return any(
+            self._similarity(content, doc_id, m) >= self._threshold
+            for doc_id in candidates
+        )
 
     def find_duplicates(self, content: str) -> list[dict[str, Any]]:
         """Find all near-duplicates of the given content.
@@ -168,6 +188,12 @@ class Deduplicator:
         """
         m = self._create_minhash(content)
         results = self._lsh.query(m)
+        if not results:
+            results = [
+                doc_id
+                for doc_id in self._minhashes
+                if self._similarity(content, doc_id, m) >= self._threshold
+            ]
 
         duplicates = []
         for doc_id in results:

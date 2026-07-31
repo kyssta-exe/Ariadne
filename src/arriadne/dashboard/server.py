@@ -111,11 +111,12 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
 
     app = FastAPI(title="Ariadne Dashboard", version="0.1.0")
 
-    # CORS — allow all origins for local dev
+    # Keep the local dashboard local; wildcard origins with credentials are
+    # invalid in browsers and unsafe when the server is exposed.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=["http://127.0.0.1:8765", "http://localhost:8765"],
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
