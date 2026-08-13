@@ -131,6 +131,16 @@ class TestEmptyDB:
         assert [m["namespace"] for m in alpha] == ["alpha"]
         assert [m["namespace"] for m in beta] == ["beta"]
 
+    def test_recall_without_namespace_searches_all_namespaces(
+        self, empty_mem: AriadneMemory
+    ) -> None:
+        """Omitting namespace must not silently restrict recall to ``default``."""
+        empty_mem.remember("alpha-only deployment note", namespace="alpha")
+
+        results = empty_mem.recall("alpha-only deployment")
+
+        assert [m["namespace"] for m in results] == ["alpha"]
+
     def test_near_duplicate_detection_is_namespace_scoped(
         self, empty_mem: AriadneMemory
     ) -> None:

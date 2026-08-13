@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ import numpy as np
 from arriadne.config import AriadneConfig
 from arriadne.dedup import ContradictionDetector, Deduplicator
 from arriadne.embeddings import Embedder, resolve_embedder
-from arriadne.storage import AriadneDB
+from arriadne.storage import AriadneDB, _now
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,11 @@ class AriadneMemory:
         agent_id: str | None = None,
         session_id: str | None = None,
         project_id: str | None = None,
+        event_at: float | None = None,
+        valid_from: float | None = None,
+        valid_to: float | None = None,
+        supersedes_id: int | None = None,
+        confidence: float = 1.0,
     ) -> dict[str, Any]:
         """Remember something by storing it in memory.
 
@@ -145,6 +151,18 @@ class AriadneMemory:
             embedding: Optional embedding vector.
             entities: Optional list of entity names.
             metadata: Optional metadata dict.
+            tags: Optional list of tags.
+            namespace: Namespace for isolation.
+            scope: Scope for isolation.
+            user_id: User identifier.
+            agent_id: Agent identifier.
+            session_id: Session identifier.
+            project_id: Project identifier.
+            event_at: Unix timestamp when the fact/event occurred.
+            valid_from: Unix timestamp when the memory becomes valid.
+            valid_to: Unix timestamp when the memory expires (None = forever).
+            supersedes_id: ID of memory this supersedes (for temporal updates).
+            confidence: Confidence score (0.0-1.0).
 
         Returns:
             Dict with 'memory_id', 'status' ('created' or 'duplicate'),
@@ -202,6 +220,11 @@ class AriadneMemory:
                     agent_id=agent_id,
                     session_id=session_id,
                     project_id=project_id,
+                    event_at=event_at,
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    supersedes_id=supersedes_id,
+                    confidence=confidence,
                 )
 
                 memory_id = storage_result["memory_id"]
@@ -261,7 +284,7 @@ class AriadneMemory:
         type_filter: str | None = None,
         time_range: tuple[float, float] | None = None,
         importance_min: float | None = None,
-        namespace: str = "default",
+        namespace: str | None = None,
     ) -> list[dict[str, Any]]:
         """Recall memories matching a query.
 
@@ -289,26 +312,41 @@ class AriadneMemory:
                 emb_array = np.asarray(embedding, dtype=np.float32)
 
             if emb_array is not None:
-                results = self._db.hybrid_search(
-                    query, embedding=emb_array, k=k * 3, namespace=namespace
-                )
+                search = self._db.hybrid_search
             else:
-                results = self._db.fts_search(query, k=k * 3, namespace=namespace)
+                search = self._db.fts_search
 
-            # Apply filters
-            filtered = []
-            for mem in results:
-                if mem.get("is_deleted"):
-                    continue
-                if type_filter and mem.get("memory_type") != type_filter:
-                    continue
-                if time_range:
-                    start, end = time_range
-                    if not (start <= mem["created_at"] <= end):
+            # Storage can cheaply return a larger candidate window, but filters
+            # applied here must keep expanding it until k eligible memories are
+            # found. A fixed 3x window creates false empty results when excluded
+            # rows rank above the requested type/time/importance.
+            candidate_k = max(k, 1)
+            results: list[dict[str, Any]] = []
+            while True:
+                if emb_array is not None:
+                    results = search(
+                        query, embedding=emb_array, k=candidate_k, namespace=namespace
+                    )
+                else:
+                    results = search(query, k=candidate_k, namespace=namespace)
+
+                filtered = []
+                for mem in results:
+                    if mem.get("is_deleted"):
                         continue
-                if importance_min is not None and mem.get("importance", 0) < importance_min:
-                    continue
-                filtered.append(mem)
+                    if type_filter and mem.get("memory_type") != type_filter:
+                        continue
+                    if time_range:
+                        start, end = time_range
+                        if not (start <= mem["created_at"] <= end):
+                            continue
+                    if importance_min is not None and mem.get("importance", 0) < importance_min:
+                        continue
+                    filtered.append(mem)
+
+                if len(filtered) >= k or len(results) < candidate_k:
+                    break
+                candidate_k *= 2
 
             final = filtered[:k]
 
@@ -582,6 +620,268 @@ class AriadneMemory:
     def export_json(self) -> dict[str, Any]:
         """Export all memories, entities, and links as JSON-safe dict."""
         return self._db.export_all()
+
+    # ── Episode / Provenance / Feedback ────────────────────────────────
+
+    def record_episode(
+        self,
+        content: str,
+        role: str,
+        source: str | None = None,
+        namespace: str = "default",
+        session_id: str | None = None,
+        event_at: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record an immutable episode (raw evidence turn)."""
+        with self._lock:
+            return self._db.add_episode(
+                content=content,
+                role=role,
+                source=source,
+                event_at=event_at,
+                metadata=metadata,
+                namespace=namespace,
+                session_id=session_id,
+            )
+
+    def remember_with_provenance(
+        self,
+        content: str,
+        episode_id: int | None,
+        source: str,
+        source_id: str | None = None,
+        span: str | None = None,
+        confidence: float = 1.0,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Remember a memory with explicit provenance linking to an episode."""
+        with self._lock:
+            result = self.remember(content, **kwargs)
+            if result.get("status") == "created":
+                memory_id = result["memory_id"]
+                self._db.add_source(
+                    memory_id=memory_id,
+                    episode_id=episode_id,
+                    source=source,
+                    source_id=source_id,
+                    span=span,
+                    confidence=confidence,
+                )
+            return result
+
+    def supersede(
+        self,
+        old_memory_id: int,
+        new_content: str,
+        episode_id: int | None = None,
+        source: str = "user",
+        source_id: str | None = None,
+        span: str | None = None,
+        confidence: float = 1.0,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Create a new memory that supersedes an old one, preserving history."""
+        with self._lock:
+            old = self._db.get_memory(old_memory_id)
+            if old is None:
+                return {"status": "error", "error": "memory not found"}
+
+            now = _now()
+            # Create new memory pointing to old
+            result = self.remember(
+                content=new_content,
+                event_at=now,
+                valid_from=now,
+                supersedes_id=old_memory_id,
+                confidence=confidence,
+                **kwargs,
+            )
+
+            if result.get("status") == "created":
+                new_id = result["memory_id"]
+                # Link sources
+                if episode_id is not None or source_id is not None or span is not None:
+                    self._db.add_source(
+                        memory_id=new_id,
+                        episode_id=episode_id,
+                        source=source,
+                        source_id=source_id,
+                        span=span,
+                        confidence=confidence,
+                    )
+                # Copy old sources to new memory for continuity
+                old_sources = self._db.get_sources_for_memory(old_memory_id)
+                for src in old_sources:
+                    self._db.add_source(
+                        memory_id=new_id,
+                        episode_id=src.get("episode_id"),
+                        source=src.get("source", "derived"),
+                        source_id=src.get("source_id"),
+                        span=src.get("span"),
+                        confidence=src.get("confidence", 1.0) * 0.9,  # Slight decay
+                    )
+
+            return result
+
+    def feedback(
+        self,
+        memory_id: int,
+        action: str,
+        confidence_delta: float = 0.0,
+        note: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """Record feedback (approve/reject/correct) on a memory."""
+        with self._lock:
+            feedback_id = self._db.add_feedback(
+                memory_id=memory_id,
+                action=action,
+                confidence_delta=confidence_delta,
+                note=note,
+                actor=actor,
+            )
+            return {"feedback_id": feedback_id, "status": "recorded"}
+
+    def get_feedback(self, memory_id: int) -> list[dict[str, Any]]:
+        """Get all feedback for a memory."""
+        return self._db.get_feedback(memory_id)
+
+    def recall(
+        self,
+        query: str,
+        embedding: list[float] | np.ndarray | None = None,
+        k: int = 10,
+        type_filter: str | None = None,
+        time_range: tuple[float, float] | None = None,
+        importance_min: float | None = None,
+        namespace: str | None = None,
+        as_of: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Recall memories matching a query.
+
+        Uses hybrid search (vector + FTS) when embedding is provided,
+        falls back to FTS-only otherwise.
+
+        Args:
+            query: Text query.
+            embedding: Optional query embedding.
+            k: Number of results.
+            type_filter: Optional memory type filter.
+            time_range: Optional (start, end) timestamps.
+            importance_min: Optional minimum importance threshold.
+            namespace: Namespace to search (None = all namespaces).
+            as_of: Unix timestamp for temporal point-in-time recall.
+
+        Returns:
+            List of matching memory dicts with sources attached.
+        """
+        try:
+            # Auto-embed the query when an embedder is configured.
+            if embedding is None and self._embedder is not None and query.strip():
+                embedding = self._embedder(query)
+
+            emb_array = None
+            if embedding is not None:
+                emb_array = np.asarray(embedding, dtype=np.float32)
+
+            if emb_array is not None:
+                search = self._db.hybrid_search
+            else:
+                search = self._db.fts_search
+
+            # Storage can cheaply return a larger candidate window, but filters
+            # applied here must keep expanding it until k eligible memories are
+            # found. A fixed 3x window creates false empty results when excluded
+            # rows rank above the requested type/time/importance.
+            candidate_k = max(k, 1)
+            results: list[dict[str, Any]] = []
+            while True:
+                if emb_array is not None:
+                    if as_of is not None:
+                        # Use temporal search when as_of is specified
+                        results = self._db.recall_with_temporal(
+                            query, embedding=emb_array, k=candidate_k, namespace=namespace, as_of=as_of
+                        )
+                    else:
+                        results = search(
+                            query, embedding=emb_array, k=candidate_k, namespace=namespace
+                        )
+                else:
+                    if as_of is not None:
+                        # Use temporal FTS search when as_of is specified
+                        results = self._db.recall_with_temporal(
+                            query, embedding=None, k=candidate_k, namespace=namespace, as_of=as_of
+                        )
+                    else:
+                        results = search(query, k=candidate_k, namespace=namespace)
+
+                filtered = []
+                for mem in results:
+                    if mem.get("is_deleted"):
+                        continue
+                    if type_filter and mem.get("memory_type") != type_filter:
+                        continue
+                    if time_range:
+                        start, end = time_range
+                        if not (start <= mem["created_at"] <= end):
+                            continue
+                    if importance_min is not None and mem.get("importance", 0) < importance_min:
+                        continue
+                    filtered.append(mem)
+
+                if len(filtered) >= k or len(results) < candidate_k:
+                    break
+                candidate_k *= 2
+
+            final = filtered[:k]
+
+            # For current recall (no as_of), filter out superseded memories
+            # Only keep memories that are not superseded by another active memory
+            if as_of is None:
+                superseded_ids = set()
+                for mem in final:
+                    supersedes_id = mem.get("supersedes_id")
+                    if supersedes_id is not None:
+                        superseded_ids.add(supersedes_id)
+                final = [m for m in final if m["id"] not in superseded_ids]
+
+            # Attach sources and feedback summary to each result
+            for mem in final:
+                mem["sources"] = self._db.get_sources_for_memory(mem["id"])
+                mem["feedback"] = self._db.get_feedback(mem["id"])
+                mem["supersession_chain"] = self._db.get_supersession_chain(mem["id"])
+
+            # Record access for the memories actually surfaced
+            if final:
+                self._db.touch_memories([m["id"] for m in final])
+
+            logger.info(
+                "Recall query=%.50s results=%d filtered=%d",
+                query, len(results), len(filtered),
+            )
+            return final
+
+        except Exception as e:
+            logger.error("Error in recall: %s", e)
+            return []
+
+    def get_history(self, memory_id: int) -> dict[str, Any]:
+        """Get full temporal history and provenance for a memory."""
+        with self._lock:
+            chain = self._db.get_supersession_chain(memory_id)
+            sources = self._db.get_sources_for_memory(memory_id)
+            feedback = self._db.get_feedback(memory_id)
+            return {
+                "memory_id": memory_id,
+                "supersession_chain": chain,
+                "sources": sources,
+                "feedback": feedback,
+            }
+
+    def invalidate(self, memory_id: int, hard: bool = False) -> bool:
+        """Invalidate a memory (soft delete by default)."""
+        return self.forget(memory_id, hard=hard)
 
     def import_json(self, data: dict[str, Any]) -> int:
         """Import from a previously exported JSON dict. Returns count imported."""

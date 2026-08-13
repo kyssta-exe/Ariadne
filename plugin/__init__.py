@@ -48,12 +48,15 @@ class AriadneMemoryProvider(MemoryProvider):
         self._ariadne = None
         self._shared = None
         self._session_id = ""
-        self._last_sync = 0.0
+        self._user_id = "default"
+        self._agent_id = "hermes"
+        self._project_id = "default"
         self._scratchpad: Dict[str, str] = {}
         self._db_path = ""
         self._shared_db_path = ""
         self._hermes_home = ""
         self._prefetch_cache: List[Dict] = []
+        self._prefetch_cache_key: tuple[str, str] | None = None
         self._prefetch_timestamp = 0.0
 
     # ── MemoryProvider interface ──────────────────────────────────────
@@ -72,6 +75,14 @@ class AriadneMemoryProvider(MemoryProvider):
         hermes_home = kwargs.get("hermes_home", os.path.expanduser("~/.hermes"))
         self._hermes_home = hermes_home
         self._session_id = session_id
+        self._user_id = str(kwargs.get("user_id") or kwargs.get("user_id_alt") or "default")
+        self._agent_id = str(kwargs.get("agent_identity") or "hermes")
+        self._project_id = str(
+            kwargs.get("project_id") or kwargs.get("agent_workspace") or "default"
+        )
+        self._prefetch_cache = []
+        self._prefetch_cache_key = None
+        self._prefetch_timestamp = 0.0
 
         # Primary DB
         db_dir = os.path.join(hermes_home, "ariadne")
@@ -95,6 +106,9 @@ class AriadneMemoryProvider(MemoryProvider):
             )
             self._ariadne = AriadneMemory(config=config)
 
+            # Upgrade the legacy literal namespace without rewriting the
+            # database: the scoped recall fallback keeps those rows readable.
+            # New writes are always identity-scoped.
             shared_config = AriadneConfig(
                 db_path=self._shared_db_path,
                 embedding_dim=384,
@@ -112,6 +126,81 @@ class AriadneMemoryProvider(MemoryProvider):
             self._ariadne = None
             self._shared = None
 
+    @staticmethod
+    def _namespace_part(value: object) -> str:
+        """Make an identity safe to embed in a colon-delimited namespace."""
+        return str(value or "default").strip().replace(":", "%3A") or "default"
+
+    def _namespace_for(self, scope: str = "session", session_id: str = "") -> str:
+        """Return an identity-scoped namespace for a logical memory scope.
+
+        The old provider used the literal namespace ``session`` for every
+        user/session. That made the scope labels decorative and made cached
+        recall cross-session. Keep the logical aliases in the tool API while
+        storing namespaced data under the active Hermes identity.
+        """
+        requested = str(scope or "session").strip()
+        lowered = requested.lower()
+        user = self._namespace_part(self._user_id)
+
+        if lowered in {"global", "user"}:
+            return f"user:{user}:global"
+        if lowered == "project":
+            return f"user:{user}:project:{self._namespace_part(self._project_id)}"
+        if lowered == "agent":
+            return f"user:{user}:agent:{self._namespace_part(self._agent_id)}"
+        if lowered == "session":
+            current = session_id or self._session_id or "default"
+            return f"user:{user}:session:{self._namespace_part(current)}"
+
+        # Explicit namespaces remain supported, but cannot escape the active
+        # user boundary. This also makes custom namespaces deterministic.
+        prefix = f"user:{user}:"
+        if requested.startswith(prefix):
+            return requested
+        return f"{prefix}custom:{self._namespace_part(requested)}"
+
+    def _scoped_namespaces(self, session_id: str = "") -> list[str]:
+        """Return safe recall namespaces, including pre-identity legacy data."""
+        names = [
+            self._namespace_for("session", session_id),
+            self._namespace_for("project", session_id),
+            self._namespace_for("agent", session_id),
+            self._namespace_for("global", session_id),
+            # Ariadne databases created by pre-identity plugin releases were
+            # stored under these literals. They are profile-local, so keeping
+            # them readable avoids silently losing existing memory on upgrade.
+            "default",
+            "session",
+        ]
+        return list(dict.fromkeys(names))
+
+    def _scoped_recall(
+        self, query: str, *, k: int, session_id: str = "", scope: str | None = None,
+        namespace: str | None = None,
+    ) -> list[Dict]:
+        """Recall from one logical scope or all identity-safe scopes."""
+        if not self._ariadne or not query.strip() or k <= 0:
+            return []
+        if namespace:
+            namespaces = [self._namespace_for(namespace, session_id)]
+        elif scope:
+            namespaces = [self._namespace_for(scope, session_id)]
+        else:
+            namespaces = self._scoped_namespaces(session_id)
+
+        by_id: dict[object, Dict] = {}
+        for current in namespaces:
+            try:
+                for result in self._ariadne.recall(query, k=k, namespace=current):
+                    memory_id = result.get("id")
+                    previous = by_id.get(memory_id)
+                    if previous is None or result.get("score", 0.0) > previous.get("score", 0.0):
+                        by_id[memory_id] = result
+            except Exception as exc:
+                logger.debug("Ariadne scoped recall failed for %s: %s", current, exc)
+        return sorted(by_id.values(), key=lambda item: item.get("score", 0.0), reverse=True)[:k]
+
     def system_prompt_block(self) -> str:
         """Return static system prompt block for Ariadne."""
         return ""  # No static block; memories are injected per-turn via prefetch()
@@ -121,15 +210,23 @@ class AriadneMemoryProvider(MemoryProvider):
         if not self._ariadne or not query.strip():
             return ""
 
-        # Use cached results if recent enough (< 2s)
-        if self._prefetch_cache and (time.time() - self._prefetch_timestamp) < 2.0:
+        key = (query.strip(), session_id or self._session_id)
+        # Cache by both query and session. A time-only cache returned the
+        # previous turn's memories for a different query/session.
+        if (
+            self._prefetch_cache_key == key
+            and (time.time() - self._prefetch_timestamp) < 2.0
+        ):
             return self._format_recall_block(self._prefetch_cache)
 
         try:
-            results = self._ariadne.recall(query, k=_MAX_PREFETCH_RESULTS, namespace="session")
+            results = self._scoped_recall(
+                query, k=_MAX_PREFETCH_RESULTS, session_id=session_id
+            )
+            self._prefetch_cache = results
+            self._prefetch_cache_key = key
+            self._prefetch_timestamp = time.time()
             if results:
-                self._prefetch_cache = results
-                self._prefetch_timestamp = time.time()
                 return self._format_recall_block(results)
         except Exception as e:
             logger.debug("Ariadne prefetch failed: %s", e)
@@ -141,12 +238,30 @@ class AriadneMemoryProvider(MemoryProvider):
         if not self._ariadne or not query.strip():
             return
         try:
-            self._prefetch_cache = self._ariadne.recall(
-                query, k=_MAX_PREFETCH_RESULTS, namespace="session"
+            self._prefetch_cache = self._scoped_recall(
+                query, k=_MAX_PREFETCH_RESULTS, session_id=session_id
             )
+            self._prefetch_cache_key = (query.strip(), session_id or self._session_id)
             self._prefetch_timestamp = time.time()
         except Exception:
             pass
+
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Rebind session-scoped state when Hermes rotates the session id."""
+        if not new_session_id:
+            return
+        self._session_id = new_session_id
+        self._prefetch_cache = []
+        self._prefetch_cache_key = None
+        self._prefetch_timestamp = 0.0
 
     def sync_turn(self, user_content: str, assistant_content: str, *,
                   session_id: str = "", messages: Optional[List[Dict]] = None) -> None:
@@ -154,11 +269,8 @@ class AriadneMemoryProvider(MemoryProvider):
         if not self._ariadne:
             return
 
-        # Throttle to avoid excessive writes
-        now = time.time()
-        if now - self._last_sync < _SYNC_THROTTLE_SECONDS:
-            return
-        self._last_sync = now
+        effective_session = session_id or self._session_id or "default"
+        namespace = self._namespace_for("session", effective_session)
 
         # Store user message
         if user_content.strip():
@@ -167,10 +279,18 @@ class AriadneMemoryProvider(MemoryProvider):
                     content=f"[USER] {user_content[:500]}",
                     memory_type="episodic",
                     importance=0.3,
-                    metadata={"source": "sync_turn", "session_id": session_id or self._session_id},
-                    namespace="session",
+                    metadata={
+                        "source": "sync_turn",
+                        "session_id": effective_session,
+                        "user_id": self._user_id,
+                        "agent_id": self._agent_id,
+                    },
+                    namespace=namespace,
                     scope="session",
-                    session_id=session_id or self._session_id or None,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    project_id=self._project_id,
+                    session_id=effective_session,
                 )
             except Exception:
                 pass
@@ -182,10 +302,18 @@ class AriadneMemoryProvider(MemoryProvider):
                     content=f"[ASSISTANT] {assistant_content[:500]}",
                     memory_type="episodic",
                     importance=0.2,
-                    metadata={"source": "sync_turn", "session_id": session_id or self._session_id},
-                    namespace="session",
+                    metadata={
+                        "source": "sync_turn",
+                        "session_id": effective_session,
+                        "user_id": self._user_id,
+                        "agent_id": self._agent_id,
+                    },
+                    namespace=namespace,
                     scope="session",
-                    session_id=session_id or self._session_id or None,
+                    user_id=self._user_id,
+                    agent_id=self._agent_id,
+                    project_id=self._project_id,
+                    session_id=effective_session,
                 )
             except Exception:
                 pass
@@ -443,11 +571,14 @@ class AriadneMemoryProvider(MemoryProvider):
 
     def _handle_remember(self, args: Dict) -> str:
         scope = args.get("scope", "session")
-        namespace = args.get("namespace") or scope
+        namespace = self._namespace_for(args.get("namespace") or scope, self._session_id)
         metadata = {
             "source": args.get("source", "user"),
             "scope": scope,
             "session_id": self._session_id,
+            "user_id": self._user_id,
+            "agent_id": self._agent_id,
+            "project_id": self._project_id,
         }
         result = self._ariadne.remember(
             content=args["content"],
@@ -456,15 +587,20 @@ class AriadneMemoryProvider(MemoryProvider):
             metadata=metadata,
             namespace=namespace,
             scope=scope,
+            user_id=self._user_id,
+            agent_id=self._agent_id,
+            project_id=self._project_id,
             session_id=self._session_id or None,
         )
         return json.dumps(result)
 
     def _handle_recall(self, args: Dict) -> str:
-        results = self._ariadne.recall(
-            query=args["query"],
+        results = self._scoped_recall(
+            args["query"],
             k=args.get("limit", 5),
-            namespace=args.get("namespace", "session"),
+            session_id=self._session_id,
+            namespace=args.get("namespace"),
+            scope=args.get("scope"),
         )
         return json.dumps(self._simplify_results(results))
 
