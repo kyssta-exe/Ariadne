@@ -362,6 +362,21 @@ class AriadneMemoryProvider(MemoryProvider):
                 },
             },
             {
+                "name": "ariadne_context_pack",
+                "description": "Pack relevant memories into a compact token-budget-aware context block.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural language query."},
+                        "token_budget": {"type": "integer", "description": "Maximum estimated tokens. Default 2000.", "default": 2000},
+                        "namespace": {"type": "string", "description": "Namespace to search. Defaults to all active identity-safe scopes."},
+                        "scope": {"type": "string", "description": "Logical scope filter: session, project, agent, or global."},
+                        "include_scores": {"type": "boolean", "description": "Include relevance scores in each line.", "default": False},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
                 "name": "ariadne_stats",
                 "description": "Return Ariadne memory statistics.",
                 "parameters": {"type": "object", "properties": {}},
@@ -538,6 +553,7 @@ class AriadneMemoryProvider(MemoryProvider):
         handlers = {
             "ariadne_remember": self._handle_remember,
             "ariadne_recall": self._handle_recall,
+            "ariadne_context_pack": self._handle_context_pack,
             "ariadne_stats": self._handle_stats,
             "ariadne_forget": self._handle_forget,
             "ariadne_update": self._handle_update,
@@ -603,6 +619,21 @@ class AriadneMemoryProvider(MemoryProvider):
             scope=args.get("scope"),
         )
         return json.dumps(self._simplify_results(results))
+
+    def _handle_context_pack(self, args: Dict) -> str:
+        namespace = args.get("namespace") or args.get("scope")
+        namespaces = (
+            [self._namespace_for(str(namespace), self._session_id)]
+            if namespace
+            else self._scoped_namespaces(self._session_id)
+        )
+        packed = self._ariadne.context_pack(
+            args["query"],
+            token_budget=args.get("token_budget", 2000),
+            include_scores=args.get("include_scores", False),
+            namespaces=namespaces,
+        )
+        return json.dumps({"query": args["query"], "context": packed})
 
     def _handle_stats(self, args: Dict) -> str:
         stats = self._ariadne.stats()
@@ -774,6 +805,8 @@ class AriadneMemoryProvider(MemoryProvider):
                 "scope": r.get("scope", "session"),
                 "importance": r.get("importance", 0.5),
                 "score": r.get("score", 0),
+                "score_parts": r.get("score_parts", {}),
+                "confidence": r.get("confidence", 1.0),
                 "search_type": r.get("search_type", ""),
             }
             out.append(item)

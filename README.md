@@ -80,10 +80,16 @@ index can never drift out of sync after deletes or restarts.
 
 Vector similarity + BM25 keywords (SQLite FTS5), fused with Reciprocal Rank
 Fusion. Keyword matching tries AND first (precise) and falls back to OR (recall).
+Stored confidence from memory provenance/feedback is applied after retrieval, so
+approved facts outrank rejected ones without hiding their history. Results
+include `score_parts` explaining the RRF/FTS and confidence contribution.
 
 ```python
 results = mem.recall("how to deploy to production", k=5)
 # Runs keyword + vector search and fuses the rankings
+
+context = mem.context_pack("how to deploy to production", token_budget=800)
+# Compact, deterministic memory block ready for an agent prompt
 ```
 
 ### Knowledge graph
@@ -190,6 +196,7 @@ The plugin exposes these `ariadne_*` tools to Hermes:
 |------|-------------|
 | `ariadne_remember` | Store a durable memory (fact, preference, insight, etc.) |
 | `ariadne_recall` | Hybrid search — FTS5 text + FAISS vector ranking |
+| `ariadne_context_pack` | Pack relevant memories under a token budget |
 | `ariadne_stats` | Return memory system statistics |
 | `ariadne_forget` | Permanently delete a memory by ID |
 | `ariadne_update` | Update content or importance of an existing memory |

@@ -5,6 +5,7 @@ author: Kyssta
 provides_tools:
   - ariadne_remember
   - ariadne_recall
+  - ariadne_context_pack
   - ariadne_stats
   - ariadne_forget
   - ariadne_update

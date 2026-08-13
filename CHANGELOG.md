@@ -2,6 +2,13 @@
 
 All notable changes to Ariadne will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Deterministic `AriadneMemory.context_pack()` for token-budget-aware context assembly.
+- `ariadne_context_pack` Hermes tool with identity-safe namespace scoping.
+- Confidence-weighted FTS and hybrid retrieval with explainable `score_parts`.
+
 ## [0.12.1] - 2026-06-30
 
 ### Fixed

@@ -883,6 +883,72 @@ class AriadneMemory:
         """Invalidate a memory (soft delete by default)."""
         return self.forget(memory_id, hard=hard)
 
+    def context_pack(
+        self,
+        query: str,
+        token_budget: int = 2000,
+        per_memory_overhead: int = 8,
+        include_scores: bool = False,
+        namespaces: list[str] | None = None,
+        **recall_kwargs: Any,
+    ) -> str:
+        """Assemble a token-budget-aware context string from recalled memories.
+
+        Uses a deterministic token estimate (chars / 4). Returns a compact
+        block of top memories ordered by relevance, under the estimated budget.
+        Feed the result straight into an LLM prompt.
+
+        Args:
+            query: Text query, forwarded to recall().
+            token_budget: Maximum tokens in the returned string.
+            per_memory_overhead: Estimated tokens of formatting wrapped
+                around each memory (label, spacing).
+            include_scores: Prepend a relevance score to each entry.
+            namespaces: Optional explicit namespace allow-list. Results from
+                those namespaces are merged and re-ranked before packing.
+            **recall_kwargs: Extra recall() filters (type_filter...).
+        """
+        limit = recall_kwargs.pop("k", 20)
+        if namespaces is None:
+            results = self.recall(query, k=limit, **recall_kwargs)
+        else:
+            recall_kwargs.pop("namespace", None)
+            by_id: dict[object, dict[str, Any]] = {}
+            for namespace in dict.fromkeys(str(item) for item in namespaces):
+                for result in self.recall(
+                    query, k=limit, namespace=namespace, **recall_kwargs
+                ):
+                    memory_id = result.get("id")
+                    previous = by_id.get(memory_id)
+                    if previous is None or result.get("score", 0.0) > previous.get("score", 0.0):
+                        by_id[memory_id] = result
+            results = sorted(
+                by_id.values(),
+                key=lambda item: (-item.get("score", 0.0), item.get("id", 0)),
+            )[:limit]
+
+        results = sorted(
+            results,
+            key=lambda item: (-item.get("score", 0.0), item.get("id", 0)),
+        )
+        lines: list[str] = []
+        used = 0
+        budget = max(0, int(token_budget))
+        overhead = max(0, int(per_memory_overhead))
+        for mem in results:
+            content = (mem.get("content") or "").strip()
+            if not content:
+                continue
+            score = mem.get("score", 0.0)
+            prefix = f"[{score:.3f}] " if include_scores else "- "
+            line = prefix + content.replace("\n", " ")
+            est = max(1, (len(line) + 3) // 4) + overhead
+            if used + est > budget:
+                continue
+            lines.append(line)
+            used += est
+        return "\n".join(lines)
+
     def import_json(self, data: dict[str, Any]) -> int:
         """Import from a previously exported JSON dict. Returns count imported."""
         count = self._db.import_all(data)

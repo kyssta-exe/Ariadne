@@ -66,6 +66,15 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def _memory_confidence(memory: dict[str, Any] | None) -> float:
+    """Return a safe confidence value for legacy or hand-edited rows."""
+    value = memory.get("confidence", 1.0) if memory else 1.0
+    try:
+        return _clamp01(1.0 if value is None else float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # Pre-compiled regex for FTS5 query parsing (Optimization: avoids re-compilation on every call)
 _FTS_WORD_RE = re.compile(r"\w+")
 
@@ -756,7 +765,7 @@ class AriadneDB:
             for mem in memories:
                 content = mem.get("content", "")
                 importance = _clamp01(mem.get("importance", 0.5))
-                confidence = _clamp01(mem.get("confidence", 1.0))
+                confidence = _memory_confidence(mem)
                 content_hash = _hash_content(content)
                 memory_type = mem.get("memory_type", "semantic")
                 namespace = mem.get("namespace", "default")
@@ -981,6 +990,7 @@ class AriadneDB:
                 metadata_json = json.dumps(mem.get("metadata")) if mem.get("metadata") else None
                 tags_json = json.dumps(mem.get("tags", []))
                 importance = _clamp01(mem.get("importance", 0.5))
+                confidence = _memory_confidence(mem)
 
                 embedding_blob = None
                 embedding = mem.get("embedding")
@@ -1010,7 +1020,7 @@ class AriadneDB:
                      namespace, scope, mem.get("user_id"), mem.get("agent_id"),
                      mem.get("session_id"), mem.get("project_id"),
                      mem.get("event_at"), mem.get("valid_from"), mem.get("valid_to"),
-                     mem.get("supersedes_id"), mem.get("confidence", 1.0)),
+                     mem.get("supersedes_id"), confidence),
                 )
                 memory_id = cursor.lastrowid
                 assert memory_id is not None
@@ -1488,12 +1498,22 @@ class AriadneDB:
             return [[] for _ in range(len(query_embeddings))]
 
     @_synchronized
-    def fts_search(self, query: str, k: int = 10, namespace: str | None = None) -> list[dict[str, Any]]:
+    def fts_search(
+        self,
+        query: str,
+        k: int = 10,
+        namespace: str | None = None,
+        confidence_weighted: bool = True,
+    ) -> list[dict[str, Any]]:
         """Search memories by full-text keyword matching.
 
         Args:
             query: Search query string.
-            k: Number of results to return.
+            k: Number of results.
+            namespace: Optional namespace filter.
+            confidence_weighted: Re-rank matches by stored confidence.
+                Disable for hybrid search, which applies confidence once after
+                RRF fusion.
 
         Returns:
             List of memory dicts ordered by relevance.
@@ -1501,43 +1521,46 @@ class AriadneDB:
         assert self._conn is not None
         try:
             # Precision first (AND), then fall back to recall (OR) when AND finds
-            # nothing. This avoids the old behaviour where every term was ORed,
-            # so any single shared stopword dragged in unrelated memories.
+            # nothing. Confidence is applied in SQL before LIMIT so a lower BM25
+            # match can legitimately outrank a rejected top match.
             rows: list[Any] = []
+            weight_expr = (
+                "(0.5 + 0.5 * MAX(0.0, MIN(1.0, COALESCE(CAST(m.confidence AS REAL), 1.0))))"
+                if confidence_weighted
+                else "1.0"
+            )
             for op in ("AND", "OR"):
                 fts_query = _fts_escape(query, op=op)
-                if namespace is None:
-                    cursor = self._conn.execute(
-                        """SELECT rowid, rank FROM memories_fts
-                           WHERE memories_fts MATCH ?
-                           ORDER BY rank
-                           LIMIT ?""",
-                        (fts_query, k),
-                    )
-                else:
-                    cursor = self._conn.execute(
-                        """SELECT f.rowid, f.rank
-                           FROM memories_fts AS f
-                           JOIN memories AS m ON m.id = f.rowid
-                           WHERE memories_fts MATCH ?
-                             AND m.namespace = ?
-                             AND m.is_deleted = 0
-                           ORDER BY f.rank
-                           LIMIT ?""",
-                        (fts_query, namespace, k),
-                    )
+                sql = f"""SELECT f.rowid, f.rank,
+                              ABS(f.rank) * {weight_expr} AS score
+                         FROM memories_fts AS f
+                         JOIN memories AS m ON m.id = f.rowid
+                        WHERE f.memories_fts MATCH ?
+                          AND m.is_deleted = 0"""
+                params: list[Any] = [fts_query]
+                if namespace is not None:
+                    sql += " AND m.namespace = ?"
+                    params.append(namespace)
+                sql += " ORDER BY score DESC, f.rowid ASC LIMIT ?"
+                params.append(k)
+                cursor = self._conn.execute(sql, params)
                 rows = cursor.fetchall()
                 if rows:
                     break
 
             results = []
-            for rowid, rank in rows:
+            for rowid, rank, score in rows:
                 memory = self.get_memory(int(rowid))
                 if memory is not None and not memory["is_deleted"]:
-                    if namespace is not None and memory.get("namespace") != namespace:
-                        continue
-                    memory["score"] = abs(float(rank))
+                    memory["score"] = float(score)
                     memory["search_type"] = "fts"
+                    if confidence_weighted:
+                        confidence = _memory_confidence(memory)
+                        memory["score_parts"] = {
+                            "fts": abs(float(rank)),
+                            "confidence": confidence,
+                            "confidence_weight": 0.5 + 0.5 * confidence,
+                        }
                     results.append(memory)
             return results
 
@@ -1569,7 +1592,9 @@ class AriadneDB:
         skip the RRF fusion step and return results directly from the non-empty source.
         This avoids unnecessary computation when one search modality finds nothing.
         """
-        fts_results = self.fts_search(query, k=k * 2, namespace=namespace)
+        fts_results = self.fts_search(
+            query, k=k * 2, namespace=namespace, confidence_weighted=False
+        )
         vector_results: list[dict[str, Any]] = []
         if embedding is not None:
             vector_results = self.vector_search(embedding, k=k * 2, namespace=namespace)
@@ -1578,16 +1603,38 @@ class AriadneDB:
         if not fts_results and not vector_results:
             return []
         if not fts_results:
-            # Only vector results — return them directly without fusion
-            for mem in vector_results[:k]:
-                mem["score"] = 1.0 / (rrf_k + 1)  # Single-source RRF score
+            # Only vector results — apply confidence before returning.
+            for rank, mem in enumerate(vector_results, 1):
+                base_score = 1.0 / (rrf_k + rank)
+                confidence = _memory_confidence(mem)
+                weight = 0.5 + 0.5 * confidence
+                mem["score"] = base_score * weight
                 mem["search_type"] = "hybrid"
+                mem["score_parts"] = {
+                    "rrf": base_score,
+                    "confidence": confidence,
+                    "confidence_weight": weight,
+                }
+            vector_results.sort(
+                key=lambda item: (-item["score"], item.get("id", 0))
+            )
             return vector_results[:k]
         if not vector_results:
-            # Only FTS results — return them directly without fusion
-            for mem in fts_results[:k]:
-                mem["score"] = 1.0 / (rrf_k + 1)  # Single-source RRF score
+            # Only FTS results — apply confidence before returning.
+            for rank, mem in enumerate(fts_results, 1):
+                base_score = 1.0 / (rrf_k + rank)
+                confidence = _memory_confidence(mem)
+                weight = 0.5 + 0.5 * confidence
+                mem["score"] = base_score * weight
                 mem["search_type"] = "hybrid"
+                mem["score_parts"] = {
+                    "rrf": base_score,
+                    "confidence": confidence,
+                    "confidence_weight": weight,
+                }
+            fts_results.sort(
+                key=lambda item: (-item["score"], item.get("id", 0))
+            )
             return fts_results[:k]
 
         # Build rank maps
@@ -1612,12 +1659,13 @@ class AriadneDB:
             if mid in vector_ranks:
                 score += 1.0 / (rrf_k + vector_ranks[mid])
             mem = self.get_memory(mid)
-            conf = mem.get("confidence", 1.0) if mem else 1.0
-            fused_scores[mid] = score * (0.5 + 0.5 * _clamp01(conf))
+            conf = _memory_confidence(mem)
+            fused_scores[mid] = score * (0.5 + 0.5 * conf)
 
         # Sort by fused score
-        sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
-        sorted_ids = sorted_ids[:k]
+        sorted_ids = sorted(
+            fused_scores.keys(), key=lambda x: (-fused_scores[x], x)
+        )[:k]
 
         results = []
         for mid in sorted_ids:
@@ -1625,10 +1673,11 @@ class AriadneDB:
             if memory is not None and not memory["is_deleted"]:
                 memory["score"] = fused_scores[mid]
                 memory["search_type"] = "hybrid"
+                confidence = _memory_confidence(memory)
                 memory["score_parts"] = {
-                    "rrf": fused_scores[mid] / (0.5 + 0.5 * _clamp01(memory.get("confidence", 1.0))),
-                    "confidence": memory.get("confidence", 1.0),
-                    "confidence_weight": 0.5 + 0.5 * _clamp01(memory.get("confidence", 1.0)),
+                    "rrf": fused_scores[mid] / (0.5 + 0.5 * confidence),
+                    "confidence": confidence,
+                    "confidence_weight": 0.5 + 0.5 * confidence,
                 }
                 results.append(memory)
         return results

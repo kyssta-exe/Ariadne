@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -17,18 +18,23 @@ AriadneMemoryProvider = _plugin.AriadneMemoryProvider
 class FakeMemory:
     def __init__(self) -> None:
         self.recall_calls: list[tuple[str, str | None]] = []
+        self.context_pack_calls: list[dict] = []
         self.remembered: list[dict] = []
 
     def recall(self, query: str, *, k: int, namespace: str | None = None) -> list[dict]:
         self.recall_calls.append((query, namespace))
         return [{"id": len(self.recall_calls), "content": f"memory for {query}", "score": 1.0}]
 
+    def context_pack(self, query: str, **kwargs):
+        self.context_pack_calls.append({"query": query, **kwargs})
+        return f"packed: {query}"
+
     def remember(self, **kwargs):
         self.remembered.append(kwargs)
         return {"status": "created", "memory_id": len(self.remembered)}
 
 
-def configured_provider() -> object:
+def configured_provider() -> AriadneMemoryProvider:
     provider = AriadneMemoryProvider()
     provider._user_id = "alice"
     provider._agent_id = "hermes"
@@ -70,6 +76,37 @@ def test_sync_turn_does_not_drop_back_to_back_turns() -> None:
     assert {item["namespace"] for item in provider._ariadne.remembered} == {
         "user:alice:session:session-1"
     }
+
+
+def test_context_pack_schema_is_registered() -> None:
+    provider = configured_provider()
+    schema = next(
+        item for item in provider.get_tool_schemas() if item["name"] == "ariadne_context_pack"
+    )
+    assert "token_budget" in schema["parameters"]["properties"]
+    assert schema["parameters"]["required"] == ["query"]
+
+
+def test_context_pack_uses_identity_safe_scopes() -> None:
+    provider = configured_provider()
+    provider._ariadne = FakeMemory()
+
+    response = json.loads(
+        provider.handle_tool_call(
+            "ariadne_context_pack",
+            {"query": "deploy", "token_budget": 64},
+        )
+    )
+
+    assert response == {"query": "deploy", "context": "packed: deploy"}
+    assert provider._ariadne.context_pack_calls == [
+        {
+            "query": "deploy",
+            "token_budget": 64,
+            "include_scores": False,
+            "namespaces": provider._scoped_namespaces("session-1"),
+        }
+    ]
 
 
 def test_session_switch_invalidates_cached_context() -> None:

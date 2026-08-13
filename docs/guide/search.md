@@ -95,8 +95,14 @@ Where:
 # 2. Run FAISS vector search, get ranked list
 # 3. For each document:
 #    rrf_score = 1/(60 + fts_rank) + 1/(60 + vector_rank)
-# 4. Sort by rrf_score descending
+#    final_score = rrf_score * (0.5 + 0.5 * confidence)
+# 4. Sort by final_score descending
 ```
+
+`confidence` is clamped to `[0, 1]`; the default `1.0` preserves the previous
+score, while low-confidence memories are down-weighted rather than deleted.
+For FTS-only recall, the same confidence weighting is applied to BM25 scores.
+Each result exposes `score_parts` for inspection.
 
 Example:
 
@@ -123,6 +129,21 @@ for r in results:
 ```
 
 When an embedding is provided, `recall()` calls `hybrid_search()` internally. Without an embedding, it falls back to `fts_search()`.
+
+## Context Packing
+
+Use `context_pack()` when an agent needs prompt-ready memory rather than raw result dictionaries:
+
+```python
+context = mem.context_pack(
+    "production deployment",
+    token_budget=800,
+    type_filter="procedural",
+    include_scores=False,
+)
+```
+
+It uses the same recall path, estimates tokens as `characters / 4`, skips entries that do not fit, and returns newline-separated memory bullets. Pass `namespaces=[...]` to merge only an explicit namespace allow-list.
 
 ## Filtering Options
 

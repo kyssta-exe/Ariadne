@@ -125,7 +125,7 @@ If it says `engine: Ariadne` — you're done.
 | Retention | ❌ | **Ebbinghaus forgetting curve** |
 
 Ariadne exposes its own memory tools (`ariadne_remember`, `ariadne_recall`,
-`ariadne_graph_query`, `ariadne_sleep`, etc.) through the standard Hermes
+`ariadne_context_pack`, `ariadne_graph_query`, `ariadne_sleep`, etc.) through the standard Hermes
 MemoryProvider interface, so the natural-language experience is unchanged — you
 just talk to Hermes and it manages memory for you.
 
