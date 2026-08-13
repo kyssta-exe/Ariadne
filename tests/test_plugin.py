@@ -52,6 +52,16 @@ def test_namespace_isolated_by_identity_and_scope() -> None:
     assert provider._namespace_for("agent", "session-1") == "user:alice:agent:hermes"
 
 
+def test_legacy_namespaces_only_expose_to_default_user() -> None:
+    provider = configured_provider()  # alice
+    assert "default" not in provider._scoped_namespaces("session-1")
+    assert "session" not in provider._scoped_namespaces("session-1")
+
+    provider._user_id = "default"  # pre-identity / legacy user
+    assert "default" in provider._scoped_namespaces("session-1")
+    assert "session" in provider._scoped_namespaces("session-1")
+
+
 def test_prefetch_cache_is_keyed_by_query_and_session() -> None:
     provider = configured_provider()
     provider._ariadne = FakeMemory()

@@ -161,18 +161,24 @@ class AriadneMemoryProvider(MemoryProvider):
         return f"{prefix}custom:{self._namespace_part(requested)}"
 
     def _scoped_namespaces(self, session_id: str = "") -> list[str]:
-        """Return safe recall namespaces, including pre-identity legacy data."""
+        """Return safe recall namespaces, including pre-identity legacy data.
+
+        Legacy databases written by pre-identity plugin releases stored memory
+        under the literal namespaces ``default``/``session``, owned by the
+        default identity. Only the default user reads those legacy rows; a
+        distinct (named) identity must not see another identity's legacy data
+        when sharing one database.
+        """
         names = [
             self._namespace_for("session", session_id),
             self._namespace_for("project", session_id),
             self._namespace_for("agent", session_id),
             self._namespace_for("global", session_id),
-            # Ariadne databases created by pre-identity plugin releases were
-            # stored under these literals. They are profile-local, so keeping
-            # them readable avoids silently losing existing memory on upgrade.
-            "default",
-            "session",
         ]
+        # The pre-identity plugin defaulted user_id to "default" and wrote to
+        # these literals. They are legacy, not the active identity's rows.
+        if str(self._user_id or "default").strip() == "default":
+            names.extend(["default", "session"])
         return list(dict.fromkeys(names))
 
     def _scoped_recall(
