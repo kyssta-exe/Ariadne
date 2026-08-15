@@ -12,7 +12,9 @@ import logging
 import shutil
 import sqlite3
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 from arriadne.config import AriadneConfig
 from arriadne.interface import AriadneMemory
@@ -385,11 +387,13 @@ def cmd_export(args: argparse.Namespace) -> int:
         output = args.output
         if output:
             import json
-            with open(output, 'w') as f:
+
+            with open(output, "w") as f:
                 json.dump(data, f, indent=2)
             print(f"Exported {len(data.get('memories', []))} memories to {output}")
         else:
             import json
+
             print(json.dumps(data, indent=2))
         mem.close()
         return 0
@@ -402,7 +406,8 @@ def cmd_import(args: argparse.Namespace) -> int:
     """Import memories from JSON file."""
     try:
         import json
-        with open(args.source, 'r') as f:
+
+        with open(args.source, "r") as f:
             data = json.load(f)
         config = AriadneConfig(db_path=args.db_path)
         mem = AriadneMemory(config=config)
@@ -421,14 +426,112 @@ def cmd_maintain(args: argparse.Namespace) -> int:
         config = AriadneConfig(db_path=args.db_path)
         mem = AriadneMemory(config=config)
         result = mem.maintenance()
-        print(f"Maintenance complete: consolidated={result.get('consolidated', 0)}, "
-              f"evicted={result.get('evicted', 0)}, "
-              f"pruned={result.get('access_log_pruned', 0)}, "
-              f"purged={result.get('purged', 0)}")
+        print(
+            f"Maintenance complete: consolidated={result.get('consolidated', 0)}, "
+            f"evicted={result.get('evicted', 0)}, "
+            f"pruned={result.get('access_log_pruned', 0)}, "
+            f"purged={result.get('purged', 0)}"
+        )
         mem.close()
         return 0
     except Exception as e:
         print(f"Error during maintenance: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_curate(args: argparse.Namespace) -> int:
+    """Run the memory curation cycle (decay + conflict resolution + consolidate)."""
+    try:
+        from arriadne.curator import MemoryCurator
+
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        curator = MemoryCurator(
+            mem,
+            decay_ttl_seconds=args.decay_ttl,
+            decay_importance_threshold=args.decay_importance,
+        )
+        report = curator.curate()
+        mem.close()
+        print(
+            f"Curation complete: decayed={report.decayed}, "
+            f"contradictions={report.contradictions_resolved}, "
+            f"consolidated={report.consolidated}"
+        )
+        return 0
+    except Exception as e:
+        print(f"Error during curation: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """List recent memories.
+
+    Shows the most recently created active memories, optionally filtered by
+    type or namespace. Useful for quick inspection without opening the
+    dashboard.
+    """
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+
+        db = mem._db
+        assert db.conn is not None
+        where_parts: list[str] = ["is_deleted = 0"]
+        params: list[Any] = []
+
+        if args.type:
+            where_parts.append("memory_type = ?")
+            params.append(args.type)
+        if args.namespace:
+            where_parts.append("namespace = ?")
+            params.append(args.namespace)
+        where_sql = " AND ".join(where_parts)
+
+        # --limit is cast to int at parse time; safe to interpolate into LIMIT.
+        rows = db.conn.execute(
+            f"""SELECT id, memory_type, namespace, importance, created_at,
+                       substr(content, 1, 80) AS preview
+                FROM memories
+                WHERE {where_sql}
+                ORDER BY created_at DESC
+                LIMIT ?""",
+            (*params, args.limit),
+        ).fetchall()
+
+        mem.close()
+
+        print(f"Memories (showing {len(rows)}/{args.limit}):")
+        for row in rows:
+            created = row["created_at"]
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created))
+            print(
+                f"  id={row['id']:>6}  type={row['memory_type']:<10}  "
+                f"namespace={row['namespace']:<12}  importance={row['importance']:.2f}"
+            )
+            print(f"         {ts}    {row['preview']!r}")
+        return 0
+    except Exception as e:
+        print(f"Error listing memories: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    """Purge (permanently delete) soft-deleted memories.
+
+    By default only rows soft-deleted more than ``--older`` seconds ago are
+    purged, keeping recently deleted rows recoverable. Pass ``--older 0`` to
+    purge everything currently soft-deleted.
+    """
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        purged = mem.purge_deleted(older_than_seconds=args.older)
+        mem.close()
+        print(f"Purged {purged} soft-deleted memory(es) (older than {args.older}s).")
+        return 0
+    except Exception as e:
+        print(f"Error purging deleted memories: {e}", file=sys.stderr)
         return 1
 
 
@@ -466,6 +569,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
         def _open() -> None:
             import time as _time
+
             _time.sleep(1.0)
             webbrowser.open(f"http://{args.host}:{args.port}")
 
@@ -490,7 +594,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Ariadne - Production-ready memory system",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Enable verbose logging",
     )
@@ -539,15 +644,54 @@ def main(argv: list[str] | None = None) -> int:
     # maintain
     subparsers.add_parser("maintain", help="Run maintenance (consolidate + evict + prune)")
 
+    # curate
+    curate_parser = subparsers.add_parser(
+        "curate", help="Run memory curation (decay + conflict + consolidate)"
+    )
+    curate_parser.add_argument(
+        "--decay-ttl",
+        type=float,
+        default=86400.0 * 30,
+        help="Decay TTL in seconds (default: 30 days); memories older & low-importance are removed",
+    )
+    curate_parser.add_argument(
+        "--decay-importance",
+        type=float,
+        default=0.4,
+        help="Importance below which stale memories are decayed (default: 0.4)",
+    )
+
+    # list
+    list_parser = subparsers.add_parser("list", help="List recent memories")
+    list_parser.add_argument(
+        "-n", "--limit", type=int, default=20, help="Max memories to list (default: 20)"
+    )
+    list_parser.add_argument("--type", help="Filter by memory type")
+    list_parser.add_argument("--namespace", help="Filter by namespace")
+
+    # purge
+    purge_parser = subparsers.add_parser("purge", help="Permanently purge soft-deleted memories")
+    purge_parser.add_argument(
+        "--older",
+        type=float,
+        default=604800.0,
+        help="Purge only rows deleted this many seconds ago (default: 7 days); use 0 for all",
+    )
+
     # backup
     backup_parser = subparsers.add_parser("backup", help="Create a consistent database backup")
-    backup_parser.add_argument("-o", "--output", help="Output backup file path (default: arriadne-backup-TIMESTAMP.db)")
+    backup_parser.add_argument(
+        "-o", "--output", help="Output backup file path (default: arriadne-backup-TIMESTAMP.db)"
+    )
 
     # restore
     restore_parser = subparsers.add_parser("restore", help="Restore database from a backup")
     restore_parser.add_argument("source", help="Path to backup file")
-    restore_parser.add_argument("--no-safety-backup", action="store_true",
-                                help="Skip creating a safety backup before restoring")
+    restore_parser.add_argument(
+        "--no-safety-backup",
+        action="store_true",
+        help="Skip creating a safety backup before restoring",
+    )
 
     # dashboard
     dash_parser = subparsers.add_parser("dashboard", help="Launch web dashboard")
@@ -580,6 +724,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_import(args)
         case "maintain":
             return cmd_maintain(args)
+        case "curate":
+            return cmd_curate(args)
+        case "list":
+            return cmd_list(args)
+        case "purge":
+            return cmd_purge(args)
         case "backup":
             return cmd_backup(args)
         case "restore":

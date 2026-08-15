@@ -5,9 +5,24 @@ All notable changes to Ariadne will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Deterministic `AriadneMemory.context_pack()` for token-budget-aware context assembly.
-- `ariadne_context_pack` Hermes tool with identity-safe namespace scoping.
-- Confidence-weighted FTS and hybrid retrieval with explainable `score_parts`.
+- **Autonomous memory layer** — `LLMMemoryManager` turns raw conversation turns into structured memories, facts, and knowledge-graph relations via an LLM caller (with a dependency-free fallback). Includes `process_turn()`, `extract()`, and `set_fact()` (KV upsert with provenance).
+- **Memory Curator** — `MemoryCurator` runs the retention/hygiene cycle: time-based decay of stale low-importance memories, contradiction detection + supersede, and consolidation orchestration. Ships as a discoverable `CuratorAddon`.
+- **MCP server** — dependency-free JSON-RPC 2.0 stdio server exposing `ariadne_recall`, `ariadne_remember`, `ariadne_forget`, and `ariadne_stats` tools to any MCP host (Claude, Cursor, VS Code Continue, etc.).
+- **Framework adapters** — `AriadneStore` (LangGraph `BaseStore`), `AriadneTools` (OpenAI Agents SDK `function_tool` wrapper), both import-guarded so core stays dependency-light.
+- **CLI** — new `ariadne list` (recent memories with `--type`/`--namespace`/`--limit`) and `ariadne purge` (permanently delete soft-deleted rows, `--older` to keep recent rows recoverable).
+- Optional dependency groups in `pyproject.toml`: `[langgraph]`, `[openai-agents]`, `[integrations]`.
+
+### Fixed
+- `AriadneStorage.add_episode` defaulted `event_at=None` into an `INSERT` against a `NOT NULL` column, crashing every `record_episode()` call that omitted an explicit timestamp. Now defaults to `now()`; explicit timestamps still flow through.
+- Removed a dead duplicate `recall()` definition in `AriadneMemory` (the first was fully shadowed by the temporal/`as_of` version).
+- Dashboard `GET /api/health-report` referenced `mem._dedup` and a non-existent `dedup_hits` counter (both `AttributeError`). Now aggregates `mem._dedup_by_namespace` sizes.
+- Graph edges silently accumulated duplicates because `add_edge` used `INSERT OR IGNORE` without a unique constraint. Added `idx_edges_uniq` on `(source_id, target_id, edge_type)` and switched to `ON CONFLICT DO UPDATE SET weight` (latest weight wins).
+- Strengthened two `test_edge_cases.py` tests that were weakened by stale comments about an old indentation bug; removed leftover dead references.
+- Excluded `tests/test_plugin.py` from the default pytest run (it requires an external Hermes `agent` module not present in the repo).
+
+### Changed
+- `ariadne.__init__` now exports `LLMMemoryManager`, `ExtractionResult`, `ExtractedMemory`, `ExtractedRelation`, `MemoryCurator`, `CurateReport`.
+- Ruff-clean across all new modules.
 
 ## [0.12.1] - 2026-06-30
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -42,15 +41,17 @@ def test_wrong_dimension_does_not_leave_a_row(tmp_path: Path) -> None:
 
 def test_content_update_clears_stale_embedding_without_embedder(tmp_path: Path) -> None:
     with AriadneDB(_config(tmp_path)) as db:
-        memory_id = db.add_memory(
-            "old semantic content", np.array([1.0, 0.0], dtype=np.float32)
-        )["memory_id"]
+        memory_id = db.add_memory("old semantic content", np.array([1.0, 0.0], dtype=np.float32))[
+            "memory_id"
+        ]
 
         assert db.update_memory(memory_id, content="new semantic content") is True
         results = db.vector_search(np.array([1.0, 0.0], dtype=np.float32), k=5)
 
         assert all(item["id"] != memory_id for item in results)
-        row = db.conn.execute("SELECT embedding FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        row = db.conn.execute(
+            "SELECT embedding FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
         assert row[0] is None
 
 
@@ -70,16 +71,12 @@ def test_filtered_recall_overfetches_until_eligible_result(tmp_path: Path) -> No
     config = _config(tmp_path)
     with AriadneMemory(config=config) as mem:
         for index in range(3):
-            mem._db.add_memory(
-                f"deploy production candidate {index}", memory_type="episodic"
-            )
-        eligible = mem._db.add_memory(
-            "deploy production semantic answer", memory_type="semantic"
-        )["memory_id"]
+            mem._db.add_memory(f"deploy production candidate {index}", memory_type="episodic")
+        eligible = mem._db.add_memory("deploy production semantic answer", memory_type="semantic")[
+            "memory_id"
+        ]
 
-        results = mem.recall(
-            "deploy production", k=1, type_filter="semantic", namespace="default"
-        )
+        results = mem.recall("deploy production", k=1, type_filter="semantic", namespace="default")
 
         assert [item["id"] for item in results] == [eligible]
 
@@ -184,12 +181,10 @@ def test_hybrid_search_ranks_higher_confidence_first(tmp_path: Path) -> None:
         # Both memories match the same query; distinct embeddings resolve
         # vector order, then confidence reweights.
         low_id = db.add_memory(
-            "apples and oranges fruit fresh",
-            np.array([1.0, 0.0], dtype=np.float32), confidence=0.1
+            "apples and oranges fruit fresh", np.array([1.0, 0.0], dtype=np.float32), confidence=0.1
         )["memory_id"]
         high_id = db.add_memory(
-            "apples and oranges fruit ripe",
-            np.array([0.0, 1.0], dtype=np.float32), confidence=1.0
+            "apples and oranges fruit ripe", np.array([0.0, 1.0], dtype=np.float32), confidence=1.0
         )["memory_id"]
 
         results = db.hybrid_search(
@@ -205,12 +200,10 @@ def test_hybrid_search_ranks_higher_confidence_first(tmp_path: Path) -> None:
 
 def test_keyword_recall_uses_confidence_weighting(tmp_path: Path) -> None:
     with AriadneMemory(config=_config(tmp_path)) as mem:
-        low_id = mem._db.add_memory(
-            "database deployment guide", confidence=0.0
-        )["memory_id"]
-        high_id = mem._db.add_memory(
-            "database deployment guide with extra notes", confidence=1.0
-        )["memory_id"]
+        low_id = mem._db.add_memory("database deployment guide", confidence=0.0)["memory_id"]
+        high_id = mem._db.add_memory("database deployment guide with extra notes", confidence=1.0)[
+            "memory_id"
+        ]
 
         results = mem.recall("database deployment guide", k=2)
 
@@ -219,12 +212,10 @@ def test_keyword_recall_uses_confidence_weighting(tmp_path: Path) -> None:
 
 def test_hybrid_single_source_still_applies_confidence(tmp_path: Path) -> None:
     with AriadneDB(_config(tmp_path)) as db:
-        low_id = db.add_memory(
-            "database deployment guide", confidence=0.0
-        )["memory_id"]
-        high_id = db.add_memory(
-            "database deployment guide with extra notes", confidence=1.0
-        )["memory_id"]
+        low_id = db.add_memory("database deployment guide", confidence=0.0)["memory_id"]
+        high_id = db.add_memory("database deployment guide with extra notes", confidence=1.0)[
+            "memory_id"
+        ]
 
         results = db.hybrid_search(
             "database deployment guide", np.array([1.0, 0.0], dtype=np.float32), k=2

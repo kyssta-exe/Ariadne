@@ -4,6 +4,7 @@ Usage:
     from arriadne.dashboard.server import create_app
     uvicorn.run(create_app(db_path="arriadne.db"), host="127.0.0.1", port=8765)
 """
+
 from __future__ import annotations
 
 import json
@@ -97,6 +98,7 @@ def _parse_range(range_str: str) -> float:
 # App factory
 # ---------------------------------------------------------------------------
 
+
 def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
     """Create and return the FastAPI application wired to an AriadneMemory instance.
 
@@ -169,6 +171,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         if search.strip():
             # Use FTS for search filtering
             from arriadne.storage import _fts_escape
+
             fts_q = _fts_escape(search)
             data_sql = f"""
                 SELECT m.id, m.content, m.memory_type, m.importance,
@@ -224,9 +227,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         """Single memory detail with entity associations."""
         db = mem._db
         conn = db.conn
-        row = conn.execute(
-            "SELECT * FROM memories WHERE id = ?", (memory_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Memory not found")
         d = dict(row)
@@ -320,9 +321,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         db = mem._db
         conn = db.conn
 
-        entities_rows = conn.execute(
-            "SELECT id, name, entity_type FROM entities"
-        ).fetchall()
+        entities_rows = conn.execute("SELECT id, name, entity_type FROM entities").fetchall()
         edges_rows = conn.execute(
             """SELECT e.id, s.name AS source, t.name AS target,
                       e.edge_type, e.weight
@@ -385,6 +384,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
     def api_config() -> Any:
         """Return current config as JSON."""
         from dataclasses import asdict
+
         return _jsonable(asdict(config))
 
     @app.get("/api/backup")
@@ -446,7 +446,9 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
             with open(str(db_path), "wb") as f:
                 f.write(contents)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {exc}") from exc
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save uploaded file: {exc}"
+            ) from exc
 
         # --- reinitialize memory system --------------------------------------
         try:
@@ -460,7 +462,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
             raise HTTPException(
                 status_code=500,
                 detail=f"Restore succeeded but reinitialization failed: {exc}; "
-                       f"safety backup saved at {safety_backup}",
+                f"safety backup saved at {safety_backup}",
             ) from exc
 
         return {
@@ -557,14 +559,18 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
             d = dict(r)
             content = d["content"] or ""
             label = content[:30] + ("..." if len(content) > 30 else "")
-            nodes.append({
-                "id": d["id"],
-                "label": label,
-                "content": content,
-                "memory_type": d["memory_type"],
-                "importance": d["importance"],
-                "tags": json.loads(d["tags"]) if isinstance(d.get("tags"), str) and d["tags"] else [],
-            })
+            nodes.append(
+                {
+                    "id": d["id"],
+                    "label": label,
+                    "content": content,
+                    "memory_type": d["memory_type"],
+                    "importance": d["importance"],
+                    "tags": json.loads(d["tags"])
+                    if isinstance(d.get("tags"), str) and d["tags"]
+                    else [],
+                }
+            )
 
         # Build edges from memory_links table
         link_rows = conn.execute(
@@ -579,12 +585,14 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
             key = (d["source_id"], d["target_id"])
             if key not in seen:
                 seen.add(key)
-                edges.append({
-                    "source": d["source_id"],
-                    "target": d["target_id"],
-                    "relation": d["link_type"],
-                    "weight": d["strength"],
-                })
+                edges.append(
+                    {
+                        "source": d["source_id"],
+                        "target": d["target_id"],
+                        "relation": d["link_type"],
+                        "weight": d["strength"],
+                    }
+                )
 
         # Build edges from shared entities
         entity_mem = conn.execute(
@@ -608,12 +616,14 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
                     key = (min(mem_ids[i], mem_ids[j]), max(mem_ids[i], mem_ids[j]))
                     if key not in seen:
                         seen.add(key)
-                        edges.append({
-                            "source": key[0],
-                            "target": key[1],
-                            "relation": f"shared:{ent}",
-                            "weight": 0.5,
-                        })
+                        edges.append(
+                            {
+                                "source": key[0],
+                                "target": key[1],
+                                "relation": f"shared:{ent}",
+                                "weight": 0.5,
+                            }
+                        )
 
         # If no edges from memory_entities or memory_links, connect memories
         # that share the same memory_type (co-category edges)
@@ -630,12 +640,14 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
                         key = (min(mem_ids[i], mem_ids[j]), max(mem_ids[i], mem_ids[j]))
                         if key not in seen:
                             seen.add(key)
-                            edges.append({
-                                "source": key[0],
-                                "target": key[1],
-                                "relation": f"type:{mt}",
-                                "weight": 0.3,
-                            })
+                            edges.append(
+                                {
+                                    "source": key[0],
+                                    "target": key[1],
+                                    "relation": f"type:{mt}",
+                                    "weight": 0.3,
+                                }
+                            )
 
         return {"nodes": _jsonable(nodes), "edges": _jsonable(edges)}
 
@@ -650,18 +662,20 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
             "SELECT COUNT(*) FROM memories WHERE is_deleted = 0"
         ).fetchone()[0]
 
-        avg_importance = conn.execute(
-            "SELECT AVG(importance) FROM memories WHERE is_deleted = 0"
-        ).fetchone()[0] or 0.0
+        avg_importance = (
+            conn.execute("SELECT AVG(importance) FROM memories WHERE is_deleted = 0").fetchone()[0]
+            or 0.0
+        )
 
         oldest_memory = conn.execute(
             "SELECT MIN(created_at) FROM memories WHERE is_deleted = 0"
         ).fetchone()[0]
         oldest_age_days = round((now - oldest_memory) / 86400, 1) if oldest_memory else 0
 
-        dedup_index_size = getattr(mem._dedup, '_minhashes', None)
-        dedup_index_size = len(dedup_index_size) if dedup_index_size else 0
-        dedup_hits = getattr(mem._dedup, 'dedup_hits', 0)
+        # AriadneMemory keeps a per-namespace MinHash Deduplicator; the dashboard
+        # surface mirrors MemoryStore.stats()'s aggregate of dedup sizes. The old
+        # code referenced mem._dedup (which doesn't exist), crashing this route.
+        dedup_index_size = sum(d.size for d in getattr(mem, "_dedup_by_namespace", {}).values())
 
         db_path = Path(db._config.db_path)
         db_size_kb = round(db_path.stat().st_size / 1024, 1) if db_path.exists() else 0
@@ -669,7 +683,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         decay_candidates = conn.execute(
             """SELECT COUNT(*) FROM memories 
                WHERE is_deleted = 0 AND created_at < ? AND importance < 0.3""",
-            (now - 2592000,)
+            (now - 2592000,),
         ).fetchone()[0]
 
         return {
@@ -678,7 +692,6 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
             "oldest_memory_days": oldest_age_days,
             "db_size_kb": db_size_kb,
             "dedup_index_size": dedup_index_size,
-            "dedup_hits": dedup_hits,
             "decay_candidates": decay_candidates,
             "status": "healthy" if total_memories > 0 else "empty",
         }
@@ -694,7 +707,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
 
         base_mem = conn.execute(
             "SELECT id, content, memory_type FROM memories WHERE id = ? AND is_deleted = 0",
-            (memory_id,)
+            (memory_id,),
         ).fetchone()
 
         if not base_mem:
@@ -725,31 +738,35 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         nodes = []
         for row in conn.execute(
             f"SELECT id, content, memory_type, importance FROM memories WHERE id IN ({placeholders}) AND is_deleted = 0",
-            tuple(neighbor_ids)
+            tuple(neighbor_ids),
         ).fetchall():
             d = dict(row)
             content = d["content"] or ""
-            nodes.append({
-                "id": d["id"],
-                "label": content[:40] + ("..." if len(content) > 40 else ""),
-                "memory_type": d["memory_type"],
-                "importance": d["importance"],
-            })
+            nodes.append(
+                {
+                    "id": d["id"],
+                    "label": content[:40] + ("..." if len(content) > 40 else ""),
+                    "memory_type": d["memory_type"],
+                    "importance": d["importance"],
+                }
+            )
 
         edges = []
         for row in conn.execute(
             f"""SELECT source_id, target_id, link_type, strength 
                 FROM memory_links 
                 WHERE source_id IN ({placeholders}) AND target_id IN ({placeholders})""",
-            tuple(neighbor_ids) * 2
+            tuple(neighbor_ids) * 2,
         ).fetchall():
             d = dict(row)
-            edges.append({
-                "source": d["source_id"],
-                "target": d["target_id"],
-                "relation": d["link_type"],
-                "weight": d["strength"],
-            })
+            edges.append(
+                {
+                    "source": d["source_id"],
+                    "target": d["target_id"],
+                    "relation": d["link_type"],
+                    "weight": d["strength"],
+                }
+            )
 
         return {
             "center_id": memory_id,
@@ -766,7 +783,6 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
     if _STATIC_DIR.exists():
         app.mount("/dashboard/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-    
     @app.get("/api/export")
     def api_export() -> Any:
         """Export all memories, entities, and links as JSON."""
@@ -805,7 +821,9 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         index = _STATIC_DIR / "index.html"
         if index.exists():
             return HTMLResponse(content=index.read_text(encoding="utf-8"))
-        return HTMLResponse(content="<h1>Ariadne Dashboard</h1><p>Frontend not built.</p>", status_code=200)
+        return HTMLResponse(
+            content="<h1>Ariadne Dashboard</h1><p>Frontend not built.</p>", status_code=200
+        )
 
     @app.get("/{full_path:path}")
     def serve_spa(full_path: str) -> HTMLResponse:
@@ -813,7 +831,9 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         index = _STATIC_DIR / "index.html"
         if index.exists():
             return HTMLResponse(content=index.read_text(encoding="utf-8"))
-        return HTMLResponse(content="<h1>Ariadne Dashboard</h1><p>Frontend not built.</p>", status_code=200)
+        return HTMLResponse(
+            content="<h1>Ariadne Dashboard</h1><p>Frontend not built.</p>", status_code=200
+        )
 
     return app
 
@@ -870,15 +890,14 @@ if __name__ == "__main__":
 # `arriadne.db` file in the current working directory as a side effect.
 # ---------------------------------------------------------------------------
 
+
 class _LazyApp:
     def __init__(self) -> None:
         self._app: FastAPI | None = None
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if self._app is None:
-            self._app = create_app(
-                db_path=os.environ.get("ARIADNE_DB_PATH", "arriadne.db")
-            )
+            self._app = create_app(db_path=os.environ.get("ARIADNE_DB_PATH", "arriadne.db"))
         await self._app(scope, receive, send)
 
 

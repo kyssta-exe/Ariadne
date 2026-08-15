@@ -344,6 +344,14 @@ class AriadneDB:
             CREATE INDEX IF NOT EXISTS idx_edges_target
                 ON edges(target_id);
 
+            -- Deduplicate identical edges so repeated add_edge() calls for the
+            -- same (source, target, type) don't accumulate rows. A unique index
+            -- is used instead of a table constraint because SQLite can't ALTER
+            -- TABLE ADD CONSTRAINT; this achieves the same effect on new and
+            -- existing databases. INSERT OR IGNORE in add_edge() honours it.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_uniq
+                ON edges(source_id, target_id, edge_type);
+
             CREATE TABLE IF NOT EXISTS memory_entities (
                 memory_id INTEGER NOT NULL,
                 entity_id INTEGER NOT NULL,
@@ -442,15 +450,9 @@ class AriadneDB:
                 created_at REAL NOT NULL
             );
         """)
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_episodes_event_at ON episodes(event_at)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_episodes_namespace ON episodes(namespace)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodes_event_at ON episodes(event_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodes_namespace ON episodes(namespace)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id)")
 
         # Source table: provenance records attached to memories
         cursor.executescript("""
@@ -467,12 +469,8 @@ class AriadneDB:
                 FOREIGN KEY (episode_id) REFERENCES episodes(id)
             );
         """)
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sources_memory ON sources(memory_id)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sources_episode ON sources(episode_id)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sources_memory ON sources(memory_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sources_episode ON sources(episode_id)")
 
         # Feedback table: user/agent approval, rejection, correction
         cursor.executescript("""
@@ -487,12 +485,8 @@ class AriadneDB:
                 FOREIGN KEY (memory_id) REFERENCES memories(id)
             );
         """)
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_feedback_memory ON feedback(memory_id)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_feedback_action ON feedback(action)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_feedback_memory ON feedback(memory_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_feedback_action ON feedback(action)")
 
         # A newly-created standalone FTS5 table has no rows for legacy
         # memories. Populate missing rowids so opening an old database does
@@ -537,7 +531,7 @@ class AriadneDB:
         if n < threshold:
             return 0
         # nlist scales with sqrt(n) and is always <= n, so training is valid.
-        return min(self._config.ivf_nlist, max(1, int(n ** 0.5)))
+        return min(self._config.ivf_nlist, max(1, int(n**0.5)))
 
     def _create_base_index(self, initial_size: int) -> faiss.Index:
         """Create the underlying (un-wrapped) FAISS index based on config and size."""
@@ -572,7 +566,9 @@ class AriadneDB:
             if vec.shape[0] != dim:
                 logger.warning(
                     "Skipping memory %d: stored embedding dim %d != configured %d",
-                    row[0], vec.shape[0], dim,
+                    row[0],
+                    vec.shape[0],
+                    dim,
                 )
                 continue
             ids.append(int(row[0]))
@@ -690,7 +686,7 @@ class AriadneDB:
                 embedding_blob = emb.tobytes()
 
             metadata_json = json.dumps(metadata) if metadata is not None else None
-            tags_json = json.dumps(tags) if tags else '[]'
+            tags_json = json.dumps(tags) if tags else "[]"
 
             cursor = self._conn.execute(
                 """INSERT INTO memories
@@ -700,10 +696,32 @@ class AriadneDB:
                     scope, user_id, agent_id, session_id, project_id,
                     event_at, valid_from, valid_to, supersedes_id, confidence)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (content, content_hash, memory_type, importance, embedding_blob,
-                 now, now, now, 0, 1.0, 0, metadata_json, tags_json, namespace, scope,
-                 user_id, agent_id, session_id, project_id,
-                 event_at, valid_from, valid_to, supersedes_id, confidence),
+                (
+                    content,
+                    content_hash,
+                    memory_type,
+                    importance,
+                    embedding_blob,
+                    now,
+                    now,
+                    now,
+                    0,
+                    1.0,
+                    0,
+                    metadata_json,
+                    tags_json,
+                    namespace,
+                    scope,
+                    user_id,
+                    agent_id,
+                    session_id,
+                    project_id,
+                    event_at,
+                    valid_from,
+                    valid_to,
+                    supersedes_id,
+                    confidence,
+                ),
             )
             memory_id = cursor.lastrowid
             assert memory_id is not None
@@ -729,7 +747,10 @@ class AriadneDB:
 
             logger.info(
                 "Added memory id=%d type=%s importance=%.2f content_preview=%.50s",
-                memory_id, memory_type, importance, content,
+                memory_id,
+                memory_type,
+                importance,
+                content,
             )
             return {"memory_id": memory_id, "status": "created"}
 
@@ -813,10 +834,32 @@ class AriadneDB:
                         scope, user_id, agent_id, session_id, project_id,
                         event_at, valid_from, valid_to, supersedes_id, confidence)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (content, content_hash, memory_type, importance, embedding_blob,
-                     now, now, now, 0, 1.0, 0, metadata_json, tags_json, namespace, scope,
-                     user_id, agent_id, session_id, project_id,
-                     event_at, valid_from, valid_to, supersedes_id, confidence),
+                    (
+                        content,
+                        content_hash,
+                        memory_type,
+                        importance,
+                        embedding_blob,
+                        now,
+                        now,
+                        now,
+                        0,
+                        1.0,
+                        0,
+                        metadata_json,
+                        tags_json,
+                        namespace,
+                        scope,
+                        user_id,
+                        agent_id,
+                        session_id,
+                        project_id,
+                        event_at,
+                        valid_from,
+                        valid_to,
+                        supersedes_id,
+                        confidence,
+                    ),
                 )
                 memory_id = cursor.lastrowid
                 assert memory_id is not None
@@ -848,10 +891,12 @@ class AriadneDB:
                 self._faiss_index.add_with_ids(matrix, ids)
                 self._maybe_upgrade_faiss_index()
 
-            logger.info("Bulk add: %d memories, %d created, %d duplicates",
-                        len(memories),
-                        sum(1 for r in results if r["status"] == "created"),
-                        sum(1 for r in results if r["status"] == "duplicate"))
+            logger.info(
+                "Bulk add: %d memories, %d created, %d duplicates",
+                len(memories),
+                sum(1 for r in results if r["status"] == "created"),
+                sum(1 for r in results if r["status"] == "duplicate"),
+            )
             return results
         except sqlite3.Error as e:
             logger.error("Database error in bulk add: %s", e)
@@ -886,7 +931,8 @@ class AriadneDB:
                 "tags": json.loads(row[11]) if row[11] else [],
                 "embedding": (
                     np.frombuffer(row[12], dtype=np.float32).tolist()
-                    if row[12] is not None else None
+                    if row[12] is not None
+                    else None
                 ),
                 "namespace": row[13],
                 "scope": row[14],
@@ -916,42 +962,85 @@ class AriadneDB:
                 (mem["id"],),
             ).fetchall()
             mem["sources"] = [
-                {"id": r[0], "episode_id": r[1], "source": r[2], "source_id": r[3],
-                 "span": r[4], "confidence": r[5], "created_at": r[6]}
+                {
+                    "id": r[0],
+                    "episode_id": r[1],
+                    "source": r[2],
+                    "source_id": r[3],
+                    "span": r[4],
+                    "confidence": r[5],
+                    "created_at": r[6],
+                }
                 for r in source_rows
             ]
             memories.append(mem)
 
-        entities = [{"id": r[0], "name": r[1], "entity_type": r[2], "created_at": r[3]}
-                    for r in self._conn.execute(
-                        "SELECT id, name, entity_type, created_at FROM entities"
-                    ).fetchall()]
+        entities = [
+            {"id": r[0], "name": r[1], "entity_type": r[2], "created_at": r[3]}
+            for r in self._conn.execute(
+                "SELECT id, name, entity_type, created_at FROM entities"
+            ).fetchall()
+        ]
 
-        memory_links = [{"source_id": r[0], "target_id": r[1], "link_type": r[2], "strength": r[3], "created_at": r[4]}
-                        for r in self._conn.execute(
-                            "SELECT source_id, target_id, link_type, strength, created_at FROM memory_links"
-                        ).fetchall()]
+        memory_links = [
+            {
+                "source_id": r[0],
+                "target_id": r[1],
+                "link_type": r[2],
+                "strength": r[3],
+                "created_at": r[4],
+            }
+            for r in self._conn.execute(
+                "SELECT source_id, target_id, link_type, strength, created_at FROM memory_links"
+            ).fetchall()
+        ]
 
-        edges = [{"source_id": r[0], "target_id": r[1], "edge_type": r[2],
-                  "weight": r[3], "created_at": r[4]}
-                 for r in self._conn.execute(
-                     "SELECT source_id, target_id, edge_type, weight, created_at FROM edges"
-                 ).fetchall()]
+        edges = [
+            {
+                "source_id": r[0],
+                "target_id": r[1],
+                "edge_type": r[2],
+                "weight": r[3],
+                "created_at": r[4],
+            }
+            for r in self._conn.execute(
+                "SELECT source_id, target_id, edge_type, weight, created_at FROM edges"
+            ).fetchall()
+        ]
 
         # Episodes
-        episodes = [{"id": r[0], "content": r[1], "role": r[2], "source": r[3],
-                     "event_at": r[4], "metadata": json.loads(r[5]) if r[5] else None,
-                     "namespace": r[6], "scope": r[7], "user_id": r[8],
-                     "agent_id": r[9], "session_id": r[10], "project_id": r[11],
-                     "created_at": r[12]}
-                    for r in self._conn.execute(
-                        """SELECT id, content, role, source, event_at, metadata,
+        episodes = [
+            {
+                "id": r[0],
+                "content": r[1],
+                "role": r[2],
+                "source": r[3],
+                "event_at": r[4],
+                "metadata": json.loads(r[5]) if r[5] else None,
+                "namespace": r[6],
+                "scope": r[7],
+                "user_id": r[8],
+                "agent_id": r[9],
+                "session_id": r[10],
+                "project_id": r[11],
+                "created_at": r[12],
+            }
+            for r in self._conn.execute(
+                """SELECT id, content, role, source, event_at, metadata,
                                   namespace, scope, user_id, agent_id, session_id,
                                   project_id, created_at
-                           FROM episodes""").fetchall()]
+                           FROM episodes"""
+            ).fetchall()
+        ]
 
-        return {"version": 1, "memories": memories, "entities": entities,
-                "edges": edges, "memory_links": memory_links, "episodes": episodes}
+        return {
+            "version": 1,
+            "memories": memories,
+            "entities": entities,
+            "edges": edges,
+            "memory_links": memory_links,
+            "episodes": episodes,
+        }
 
     @_synchronized
     def import_all(self, data: dict[str, Any]) -> int:
@@ -1001,7 +1090,8 @@ class AriadneDB:
                     else:
                         logger.warning(
                             "Import: dropping embedding with dim %d != configured %d",
-                            emb.shape[0], dim,
+                            emb.shape[0],
+                            dim,
                         )
 
                 cursor = self._conn.execute(
@@ -1012,15 +1102,31 @@ class AriadneDB:
                         user_id, agent_id, session_id, project_id,
                         event_at, valid_from, valid_to, supersedes_id, confidence)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (content, content_hash,
-                     mem.get("memory_type", "semantic"), importance, embedding_blob,
-                     mem.get("created_at", now), now,
-                     mem.get("accessed_at", now), mem.get("access_count", 0),
-                     mem.get("retention_strength", 1.0), metadata_json, tags_json,
-                     namespace, scope, mem.get("user_id"), mem.get("agent_id"),
-                     mem.get("session_id"), mem.get("project_id"),
-                     mem.get("event_at"), mem.get("valid_from"), mem.get("valid_to"),
-                     mem.get("supersedes_id"), confidence),
+                    (
+                        content,
+                        content_hash,
+                        mem.get("memory_type", "semantic"),
+                        importance,
+                        embedding_blob,
+                        mem.get("created_at", now),
+                        now,
+                        mem.get("accessed_at", now),
+                        mem.get("access_count", 0),
+                        mem.get("retention_strength", 1.0),
+                        metadata_json,
+                        tags_json,
+                        namespace,
+                        scope,
+                        mem.get("user_id"),
+                        mem.get("agent_id"),
+                        mem.get("session_id"),
+                        mem.get("project_id"),
+                        mem.get("event_at"),
+                        mem.get("valid_from"),
+                        mem.get("valid_to"),
+                        mem.get("supersedes_id"),
+                        confidence,
+                    ),
                 )
                 memory_id = cursor.lastrowid
                 assert memory_id is not None
@@ -1053,8 +1159,13 @@ class AriadneDB:
                 self._conn.execute(
                     """INSERT INTO edges (source_id, target_id, edge_type, weight, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
-                    (source_id, target_id, edge.get("edge_type", "related"),
-                     edge.get("weight", 1.0), edge.get("created_at", now)),
+                    (
+                        source_id,
+                        target_id,
+                        edge.get("edge_type", "related"),
+                        edge.get("weight", 1.0),
+                        edge.get("created_at", now),
+                    ),
                 )
 
             # Re-import memory_links, remapping endpoints to their new ids.
@@ -1068,11 +1179,18 @@ class AriadneDB:
                 self._conn.execute(
                     """INSERT OR IGNORE INTO memory_links (source_id, target_id, link_type, strength, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
-                    (source_id, target_id, link.get("link_type", "related"),
-                     link.get("strength", 1.0), link.get("created_at", now)),
+                    (
+                        source_id,
+                        target_id,
+                        link.get("link_type", "related"),
+                        link.get("strength", 1.0),
+                        link.get("created_at", now),
+                    ),
                 )
             if skipped_links:
-                logger.warning("Import: skipped %d links with unresolvable endpoints", skipped_links)
+                logger.warning(
+                    "Import: skipped %d links with unresolvable endpoints", skipped_links
+                )
 
             # Import episodes
             for episode in data.get("episodes", []):
@@ -1081,13 +1199,20 @@ class AriadneDB:
                        (content, role, source, event_at, metadata, namespace, scope,
                         user_id, agent_id, session_id, project_id, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (episode.get("content", ""), episode.get("role", "user"),
-                     episode.get("source"), episode.get("event_at"),
-                     json.dumps(episode.get("metadata")) if episode.get("metadata") else None,
-                     episode.get("namespace", "default"), episode.get("scope", "session"),
-                     episode.get("user_id"), episode.get("agent_id"),
-                     episode.get("session_id"), episode.get("project_id"),
-                     episode.get("created_at", now)),
+                    (
+                        episode.get("content", ""),
+                        episode.get("role", "user"),
+                        episode.get("source"),
+                        episode.get("event_at"),
+                        json.dumps(episode.get("metadata")) if episode.get("metadata") else None,
+                        episode.get("namespace", "default"),
+                        episode.get("scope", "session"),
+                        episode.get("user_id"),
+                        episode.get("agent_id"),
+                        episode.get("session_id"),
+                        episode.get("project_id"),
+                        episode.get("created_at", now),
+                    ),
                 )
 
             # Import sources
@@ -1096,13 +1221,15 @@ class AriadneDB:
                     """INSERT INTO sources
                        (memory_id, episode_id, source, source_id, span, confidence, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (id_map.get(source.get("memory_id")),
-                     source.get("episode_id"),
-                     source.get("source", "imported"),
-                     source.get("source_id"),
-                     source.get("span"),
-                     source.get("confidence", 1.0),
-                     source.get("created_at", now)),
+                    (
+                        id_map.get(source.get("memory_id")),
+                        source.get("episode_id"),
+                        source.get("source", "imported"),
+                        source.get("source_id"),
+                        source.get("span"),
+                        source.get("confidence", 1.0),
+                        source.get("created_at", now),
+                    ),
                 )
 
             self._commit()
@@ -1120,9 +1247,7 @@ class AriadneDB:
     def _get_or_create_entity(self, name: str) -> int:
         """Get entity ID by name, creating if it doesn't exist."""
         assert self._conn is not None
-        cursor = self._conn.execute(
-            "SELECT id FROM entities WHERE name = ?", (name,)
-        )
+        cursor = self._conn.execute("SELECT id FROM entities WHERE name = ?", (name,))
         row = cursor.fetchone()
         if row is not None:
             return int(row[0])
@@ -1349,9 +1474,7 @@ class AriadneDB:
         """
         assert self._conn is not None
         try:
-            cursor = self._conn.execute(
-                "SELECT id FROM memories WHERE id = ?", (memory_id,)
-            )
+            cursor = self._conn.execute("SELECT id FROM memories WHERE id = ?", (memory_id,))
             if cursor.fetchone() is None:
                 return False
 
@@ -1360,8 +1483,10 @@ class AriadneDB:
                 # while memory_entities/memory_links/access_log still reference
                 # it fails with "FOREIGN KEY constraint failed".
                 self._conn.execute("DELETE FROM memory_entities WHERE memory_id = ?", (memory_id,))
-                self._conn.execute("DELETE FROM memory_links WHERE source_id = ? OR target_id = ?",
-                                   (memory_id, memory_id))
+                self._conn.execute(
+                    "DELETE FROM memory_links WHERE source_id = ? OR target_id = ?",
+                    (memory_id, memory_id),
+                )
                 self._conn.execute("DELETE FROM access_log WHERE memory_id = ?", (memory_id,))
                 self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
                 # Remove the vector from FAISS by its id (IndexIDMap2)
@@ -1411,7 +1536,9 @@ class AriadneDB:
         try:
             emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
             vec = emb.reshape(1, -1)
-            requested_k = min(self._faiss_index.ntotal, self._faiss_index.ntotal if namespace else k)
+            requested_k = min(
+                self._faiss_index.ntotal, self._faiss_index.ntotal if namespace else k
+            )
             distances, indices = self._faiss_index.search(vec, requested_k)
 
             results = []
@@ -1436,7 +1563,9 @@ class AriadneDB:
 
     @_synchronized
     def search_vector_batch(
-        self, query_embeddings: np.ndarray, k: int = 10,
+        self,
+        query_embeddings: np.ndarray,
+        k: int = 10,
         namespace: str | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Search memories by vector similarity for multiple queries at once.
@@ -1469,8 +1598,10 @@ class AriadneDB:
             norms = np.where(norms < 1e-10, 1.0, norms)
             queries = queries / norms
 
-            search_k = self._faiss_index.ntotal if namespace is not None else min(
-                k, self._faiss_index.ntotal
+            search_k = (
+                self._faiss_index.ntotal
+                if namespace is not None
+                else min(k, self._faiss_index.ntotal)
             )
             distances, indices = self._faiss_index.search(queries, search_k)
 
@@ -1615,9 +1746,7 @@ class AriadneDB:
                     "confidence": confidence,
                     "confidence_weight": weight,
                 }
-            vector_results.sort(
-                key=lambda item: (-item["score"], item.get("id", 0))
-            )
+            vector_results.sort(key=lambda item: (-item["score"], item.get("id", 0)))
             return vector_results[:k]
         if not vector_results:
             # Only FTS results — apply confidence before returning.
@@ -1632,9 +1761,7 @@ class AriadneDB:
                     "confidence": confidence,
                     "confidence_weight": weight,
                 }
-            fts_results.sort(
-                key=lambda item: (-item["score"], item.get("id", 0))
-            )
+            fts_results.sort(key=lambda item: (-item["score"], item.get("id", 0)))
             return fts_results[:k]
 
         # Build rank maps
@@ -1663,9 +1790,7 @@ class AriadneDB:
             fused_scores[mid] = score * (0.5 + 0.5 * conf)
 
         # Sort by fused score
-        sorted_ids = sorted(
-            fused_scores.keys(), key=lambda x: (-fused_scores[x], x)
-        )[:k]
+        sorted_ids = sorted(fused_scores.keys(), key=lambda x: (-fused_scores[x], x))[:k]
 
         results = []
         for mid in sorted_ids:
@@ -1702,9 +1827,14 @@ class AriadneDB:
         try:
             source_id = self._get_or_create_entity(source_entity)
             target_id = self._get_or_create_entity(target_entity)
+            # UPSERT on the (source, target, type) unique index: a brand-new edge
+            # is inserted, while re-declaring the same edge refreshes its weight
+            # (the latest declaration wins) without creating duplicate rows.
             self._conn.execute(
-                """INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
+                """INSERT INTO edges (source_id, target_id, edge_type, weight, created_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(source_id, target_id, edge_type)
+                   DO UPDATE SET weight = excluded.weight""",
                 (source_id, target_id, edge_type, weight, _now()),
             )
             self._commit()
@@ -1735,9 +1865,7 @@ class AriadneDB:
         assert self._conn is not None
         try:
             # Find source entity
-            cursor = self._conn.execute(
-                "SELECT id FROM entities WHERE name = ?", (entity_name,)
-            )
+            cursor = self._conn.execute("SELECT id FROM entities WHERE name = ?", (entity_name,))
             row = cursor.fetchone()
             if row is None:
                 return {"nodes": [entity_name], "edges": []}
@@ -1801,12 +1929,14 @@ class AriadneDB:
                 cursor = self._conn.execute(edge_query, node_list + node_list)
                 edges = []
                 for row in cursor.fetchall():
-                    edges.append({
-                        "source": row[4],
-                        "target": row[5],
-                        "type": row[2],
-                        "weight": row[3],
-                    })
+                    edges.append(
+                        {
+                            "source": row[4],
+                            "target": row[5],
+                            "type": row[2],
+                            "weight": row[3],
+                        }
+                    )
             else:
                 edges = []
 
@@ -1887,9 +2017,7 @@ class AriadneDB:
         """
         assert self._conn is not None
         try:
-            cursor = self._conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE is_deleted = 0"
-            )
+            cursor = self._conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
             total = cursor.fetchone()[0]
             if total == 0:
                 return 0
@@ -1971,26 +2099,32 @@ class AriadneDB:
             for row in rows:
                 mid = row[0]
                 token_sets[mid] = set(row[1].lower().split())
-                memories.append({
-                    "id": mid,
-                    "content": row[1],
-                    "importance": row[2],
-                    "embedding": row[3],
-                    "namespace": row[5],
-                    "scope": row[6],
-                    "user_id": row[7],
-                    "agent_id": row[8],
-                    "session_id": row[9],
-                    "project_id": row[10],
-                })
+                memories.append(
+                    {
+                        "id": mid,
+                        "content": row[1],
+                        "importance": row[2],
+                        "embedding": row[3],
+                        "namespace": row[5],
+                        "scope": row[6],
+                        "user_id": row[7],
+                        "agent_id": row[8],
+                        "session_id": row[9],
+                        "project_id": row[10],
+                    }
+                )
 
             # Consolidate only within an identical isolation key. Never merge
             # data across namespaces, users, projects, agents, or sessions.
             grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
             for memory in memories:
                 key = (
-                    memory["namespace"], memory["scope"], memory["user_id"],
-                    memory["agent_id"], memory["session_id"], memory["project_id"],
+                    memory["namespace"],
+                    memory["scope"],
+                    memory["user_id"],
+                    memory["agent_id"],
+                    memory["session_id"],
+                    memory["project_id"],
                 )
                 grouped.setdefault(key, []).append(memory)
 
@@ -2180,6 +2314,13 @@ class AriadneDB:
             )
             result["by_type"] = {row[0]: row[1] for row in cursor.fetchall()}
 
+            # By namespace (active rows)
+            cursor = self._conn.execute(
+                """SELECT namespace, COUNT(*) FROM memories
+                   WHERE is_deleted = 0 GROUP BY namespace"""
+            )
+            result["by_namespace"] = {row[0]: row[1] for row in cursor.fetchall()}
+
             # Entity counts
             cursor = self._conn.execute("SELECT COUNT(*) FROM entities")
             result["total_entities"] = cursor.fetchone()[0]
@@ -2208,9 +2349,7 @@ class AriadneDB:
                 result["faiss_dimension"] = self._config.embedding_dim
 
             # Average importance
-            cursor = self._conn.execute(
-                "SELECT AVG(importance) FROM memories WHERE is_deleted = 0"
-            )
+            cursor = self._conn.execute("SELECT AVG(importance) FROM memories WHERE is_deleted = 0")
             avg_row = cursor.fetchone()
             result["avg_importance"] = round(float(avg_row[0] or 0.0), 4)
 
@@ -2247,15 +2386,29 @@ class AriadneDB:
         """Add an immutable episode (raw evidence)."""
         assert self._conn is not None
         now = _now()
+        # event_at is NOT NULL in the schema; default to "now" when the caller
+        # omits it instead of letting the INSERT violate the constraint.
+        event_time = now if event_at is None else event_at
         try:
             cursor = self._conn.execute(
                 """INSERT INTO episodes
                    (content, role, source, event_at, metadata, namespace, scope,
                     user_id, agent_id, session_id, project_id, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (content, role, source, event_at,
-                 json.dumps(metadata) if metadata else None,
-                 namespace, scope, user_id, agent_id, session_id, project_id, now),
+                (
+                    content,
+                    role,
+                    source,
+                    event_time,
+                    json.dumps(metadata) if metadata else None,
+                    namespace,
+                    scope,
+                    user_id,
+                    agent_id,
+                    session_id,
+                    project_id,
+                    now,
+                ),
             )
             episode_id = cursor.lastrowid
             self._commit()
@@ -2283,8 +2436,7 @@ class AriadneDB:
                 """INSERT INTO sources
                    (memory_id, episode_id, source, source_id, span, confidence, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (memory_id, episode_id, source, source_id, span,
-                 _clamp01(confidence), now),
+                (memory_id, episode_id, source, source_id, span, _clamp01(confidence), now),
             )
             source_id_val = cursor.lastrowid
             self._commit()
@@ -2339,8 +2491,14 @@ class AriadneDB:
             (memory_id,),
         ).fetchall()
         return [
-            {"id": r[0], "action": r[1], "confidence_delta": r[2],
-             "note": r[3], "actor": r[4], "created_at": r[5]}
+            {
+                "id": r[0],
+                "action": r[1],
+                "confidence_delta": r[2],
+                "note": r[3],
+                "actor": r[4],
+                "created_at": r[5],
+            }
             for r in rows
         ]
 
@@ -2358,7 +2516,9 @@ class AriadneDB:
         try:
             # Base search
             if embedding is not None:
-                results = self.hybrid_search(query, embedding=embedding, k=k * 3, namespace=namespace)
+                results = self.hybrid_search(
+                    query, embedding=embedding, k=k * 3, namespace=namespace
+                )
             else:
                 results = self.fts_search(query, k=k * 3, namespace=namespace)
 
@@ -2410,8 +2570,16 @@ class AriadneDB:
             (memory_id,),
         ).fetchall()
         return [
-            {"id": r[0], "episode_id": r[1], "source": r[2], "source_id": r[3],
-             "span": r[4], "confidence": r[5], "created_at": r[6], "episode_content": r[7]}
+            {
+                "id": r[0],
+                "episode_id": r[1],
+                "source": r[2],
+                "source_id": r[3],
+                "span": r[4],
+                "confidence": r[5],
+                "created_at": r[6],
+                "episode_content": r[7],
+            }
             for r in rows
         ]
 

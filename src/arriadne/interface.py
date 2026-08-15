@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +107,6 @@ class AriadneMemory:
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Failed to load dedup index from DB: %s", e)
 
-
     def close(self) -> None:
         """Close the memory system, saving all state."""
         self._db.close()
@@ -201,9 +199,9 @@ class AriadneMemory:
                 # Canonicalize entities to prevent fragmentation (e.g., "Mailcow" vs "mailcow")
                 canonical_entities = None
                 if entities:
-                    canonical_entities = list({
-                        e.strip().lower() for e in entities if isinstance(e, str) and e.strip()
-                    })
+                    canonical_entities = list(
+                        {e.strip().lower() for e in entities if isinstance(e, str) and e.strip()}
+                    )
 
                 # Add to storage
                 storage_result = self._db.add_memory(
@@ -237,7 +235,9 @@ class AriadneMemory:
 
             logger.info(
                 "Remember: id=%s status=%s type=%s",
-                memory_id, result["status"], memory_type,
+                memory_id,
+                result["status"],
+                memory_type,
             )
             return result
 
@@ -274,96 +274,6 @@ class AriadneMemory:
             return contradictions
         except Exception as e:
             logger.debug("Contradiction check error: %s", e)
-            return []
-
-    def recall(
-        self,
-        query: str,
-        embedding: list[float] | np.ndarray | None = None,
-        k: int = 10,
-        type_filter: str | None = None,
-        time_range: tuple[float, float] | None = None,
-        importance_min: float | None = None,
-        namespace: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Recall memories matching a query.
-
-        Uses hybrid search (vector + FTS) when embedding is provided,
-        falls back to FTS-only otherwise.
-
-        Args:
-            query: Text query.
-            embedding: Optional query embedding.
-            k: Number of results.
-            type_filter: Optional memory type filter.
-            time_range: Optional (start, end) timestamps.
-            importance_min: Optional minimum importance threshold.
-
-        Returns:
-            List of matching memory dicts.
-        """
-        try:
-            # Auto-embed the query when an embedder is configured.
-            if embedding is None and self._embedder is not None and query.strip():
-                embedding = self._embedder(query)
-
-            emb_array = None
-            if embedding is not None:
-                emb_array = np.asarray(embedding, dtype=np.float32)
-
-            if emb_array is not None:
-                search = self._db.hybrid_search
-            else:
-                search = self._db.fts_search
-
-            # Storage can cheaply return a larger candidate window, but filters
-            # applied here must keep expanding it until k eligible memories are
-            # found. A fixed 3x window creates false empty results when excluded
-            # rows rank above the requested type/time/importance.
-            candidate_k = max(k, 1)
-            results: list[dict[str, Any]] = []
-            while True:
-                if emb_array is not None:
-                    results = search(
-                        query, embedding=emb_array, k=candidate_k, namespace=namespace
-                    )
-                else:
-                    results = search(query, k=candidate_k, namespace=namespace)
-
-                filtered = []
-                for mem in results:
-                    if mem.get("is_deleted"):
-                        continue
-                    if type_filter and mem.get("memory_type") != type_filter:
-                        continue
-                    if time_range:
-                        start, end = time_range
-                        if not (start <= mem["created_at"] <= end):
-                            continue
-                    if importance_min is not None and mem.get("importance", 0) < importance_min:
-                        continue
-                    filtered.append(mem)
-
-                if len(filtered) >= k or len(results) < candidate_k:
-                    break
-                candidate_k *= 2
-
-            final = filtered[:k]
-
-            # Record access for the memories actually surfaced — one batched
-            # write, instead of the old behaviour where every candidate hit was
-            # updated+committed individually inside search.
-            if final:
-                self._db.touch_memories([m["id"] for m in final])
-
-            logger.info(
-                "Recall query=%.50s results=%d filtered=%d",
-                query, len(results), len(filtered),
-            )
-            return final
-
-        except Exception as e:
-            logger.error("Error in recall: %s", e)
             return []
 
     def forget(self, memory_id: int, hard: bool = False) -> bool:
@@ -464,7 +374,10 @@ class AriadneMemory:
             result = self._db.traverse_graph(entity, hops=hops, edge_type=edge_type)
             logger.info(
                 "Graph: entity=%s hops=%d nodes=%d edges=%d",
-                entity, hops, len(result["nodes"]), len(result["edges"]),
+                entity,
+                hops,
+                len(result["nodes"]),
+                len(result["edges"]),
             )
             return result
         except Exception as e:
@@ -546,9 +459,7 @@ class AriadneMemory:
             pruned = self._db.prune_access_log()
             # Keep recently soft-deleted rows recoverable; purging with 0 here
             # would permanently destroy everything evict() just soft-deleted.
-            purged = self._db.purge_deleted(
-                older_than_seconds=self._config.purge_retention_seconds
-            )
+            purged = self._db.purge_deleted(older_than_seconds=self._config.purge_retention_seconds)
         return {
             "consolidated": consolidated,
             "evicted": evicted,
@@ -801,7 +712,11 @@ class AriadneMemory:
                     if as_of is not None:
                         # Use temporal search when as_of is specified
                         results = self._db.recall_with_temporal(
-                            query, embedding=emb_array, k=candidate_k, namespace=namespace, as_of=as_of
+                            query,
+                            embedding=emb_array,
+                            k=candidate_k,
+                            namespace=namespace,
+                            as_of=as_of,
                         )
                     else:
                         results = search(
@@ -858,7 +773,9 @@ class AriadneMemory:
 
             logger.info(
                 "Recall query=%.50s results=%d filtered=%d",
-                query, len(results), len(filtered),
+                query,
+                len(results),
+                len(filtered),
             )
             return final
 
@@ -915,9 +832,7 @@ class AriadneMemory:
             recall_kwargs.pop("namespace", None)
             by_id: dict[object, dict[str, Any]] = {}
             for namespace in dict.fromkeys(str(item) for item in namespaces):
-                for result in self.recall(
-                    query, k=limit, namespace=namespace, **recall_kwargs
-                ):
+                for result in self.recall(query, k=limit, namespace=namespace, **recall_kwargs):
                     memory_id = result.get("id")
                     previous = by_id.get(memory_id)
                     if previous is None or result.get("score", 0.0) > previous.get("score", 0.0):

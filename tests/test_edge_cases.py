@@ -23,6 +23,7 @@ from arriadne.storage import AriadneDB, _fts_escape
 # Helper: create a fresh temp db path, return config, and clean up on teardown
 # ---------------------------------------------------------------------------
 
+
 def _make_config(embedding_dim: int = 8, **kwargs) -> AriadneConfig:
     """Create config with a unique temp db path."""
     path = f"/tmp/arriadne_test_{uuid.uuid4().hex[:12]}.db"
@@ -46,6 +47,7 @@ def _make_fresh_mem(embedding_dim: int = 8, **kwargs) -> AriadneMemory:
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def empty_config() -> AriadneConfig:
@@ -98,6 +100,7 @@ def populated_mem(populated_config: AriadneConfig) -> AriadneMemory:
 # 1. TestEmptyDB
 # ===================================================================
 
+
 class TestEmptyDB:
     """All operations on a completely empty database."""
 
@@ -141,9 +144,7 @@ class TestEmptyDB:
 
         assert [m["namespace"] for m in results] == ["alpha"]
 
-    def test_near_duplicate_detection_is_namespace_scoped(
-        self, empty_mem: AriadneMemory
-    ) -> None:
+    def test_near_duplicate_detection_is_namespace_scoped(self, empty_mem: AriadneMemory) -> None:
         """Same content is allowed in separate namespaces via the interface."""
         first = empty_mem.remember("same durable note", namespace="alpha")
         second = empty_mem.remember("same durable note", namespace="beta")
@@ -154,15 +155,13 @@ class TestEmptyDB:
         assert third["status"] == "duplicate"
 
     def test_stats_does_not_crash(self, empty_mem: AriadneMemory) -> None:
-        """stats() on empty DB returns a dict (may contain error due to
-        indentation bug in source; the interface catches it gracefully)."""
+        """stats() on empty DB returns meaningful zeros."""
         s = empty_mem.stats()
         assert isinstance(s, dict)
-        # If stats returned without error, verify keys; otherwise accept error dict
-        if "error" not in s:
-            assert s["active_memories"] == 0
-            assert s["total_memories"] == 0
-            assert s["deleted_memories"] == 0
+        assert "error" not in s
+        assert s["active_memories"] == 0
+        assert s["total_memories"] == 0
+        assert s["deleted_memories"] == 0
 
     def test_add_remove_works(self, empty_mem: AriadneMemory) -> None:
         """Add and soft-delete on empty DB work normally."""
@@ -226,9 +225,7 @@ class TestEmptyDB:
             empty_db.delete_memory(r["memory_id"], hard=False)
 
         # Verify via raw SQL
-        cursor = empty_db.conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE is_deleted = 0"
-        )
+        cursor = empty_db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
         assert cursor.fetchone()[0] == 0
         cursor = empty_db.conn.execute("SELECT COUNT(*) FROM memories")
         assert cursor.fetchone()[0] == 5
@@ -237,6 +234,7 @@ class TestEmptyDB:
 # ===================================================================
 # 2. TestInvalidInputs
 # ===================================================================
+
 
 class TestInvalidInputs:
     """Add memories with invalid / edge-case inputs."""
@@ -340,6 +338,7 @@ class TestInvalidInputs:
 # 3. TestFTSEdgeCases
 # ===================================================================
 
+
 class TestFTSEdgeCases:
     """FTS5 edge cases: special characters, empty queries, multi-word."""
 
@@ -372,16 +371,16 @@ class TestFTSEdgeCases:
         """Queries with FTS5 special chars must not crash."""
         special_queries = [
             '"quotes"',
-            'backslash\\test',
-            '@at_sign',
-            '#hash',
-            '%percent',
-            '*star',
-            '~tilde',
-            '-dash',
-            '(parens)',
-            '[brackets]',
-            ';semicolon',
+            "backslash\\test",
+            "@at_sign",
+            "#hash",
+            "%percent",
+            "*star",
+            "~tilde",
+            "-dash",
+            "(parens)",
+            "[brackets]",
+            ";semicolon",
         ]
         for q in special_queries:
             results = self._mem.recall(q, k=5)
@@ -456,6 +455,7 @@ class TestFTSEdgeCases:
 # ===================================================================
 # 4. TestVectorEdgeCases
 # ===================================================================
+
 
 class TestVectorEdgeCases:
     """Vector search edge cases: wrong dim, zero vectors, k values."""
@@ -559,6 +559,7 @@ class TestVectorEdgeCases:
 # 5. TestStress
 # ===================================================================
 
+
 class TestStress:
     """Stress tests: bulk add, concurrent searches, add/delete/re-add."""
 
@@ -641,15 +642,14 @@ class TestStress:
             )
             assert result["status"] == "created"
 
-        cursor = empty_db.conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE is_deleted = 0"
-        )
+        cursor = empty_db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
         assert cursor.fetchone()[0] == 200
 
 
 # ===================================================================
 # 6. TestGraphEdgeCases
 # ===================================================================
+
 
 class TestGraphEdgeCases:
     """Graph edge cases: self-loops, nonexistent entities, hop limits."""
@@ -704,22 +704,27 @@ class TestGraphEdgeCases:
         """Traverse with max_hops=10 should not exceed config max."""
         # Build a chain of 5 nodes
         for i in range(5):
-            self._mem.add_edge(f"Chain{i}", f"Chain{i+1}", "next")
+            self._mem.add_edge(f"Chain{i}", f"Chain{i + 1}", "next")
 
         result = self._mem.graph("Chain0", hops=10)
         assert len(result["nodes"]) >= 6  # Chain0..Chain5
 
-    def test_add_duplicate_edge(self) -> None:
-        """Adding the same edge twice: edges table has no unique constraint
-        on (source_id, target_id, edge_type), so duplicates are stored."""
+    def test_add_duplicate_edge_deduplicates_by_identity(self) -> None:
+        """Adding the same (source, target, type) edge twice stores exactly one
+        row and the latest weight wins (UPSERT on a unique edge index)."""
         self._mem.add_edge("X", "Y", "knows", weight=0.8)
-        self._mem.add_edge("X", "Y", "knows", weight=0.9)  # duplicate
+        self._mem.add_edge("X", "Y", "knows", weight=0.9)  # same edge, new weight
 
-        # Both edges should exist (no UNIQUE constraint prevents dupes)
         cursor = self._mem._db.conn.execute("SELECT COUNT(*) FROM edges")
-        assert cursor.fetchone()[0] == 2
+        assert cursor.fetchone()[0] == 1
+        cursor = self._mem._db.conn.execute(
+            "SELECT weight FROM edges WHERE source_id = "
+            "(SELECT id FROM entities WHERE name='X') AND target_id = "
+            "(SELECT id FROM entities WHERE name='Y') AND edge_type='knows'"
+        )
+        assert cursor.fetchone()[0] == 0.9
 
-        # Traversal still works (finds both)
+        # Traversal still works (single edge)
         result = self._mem.graph("X", hops=1)
         assert "Y" in result["nodes"]
 
@@ -760,6 +765,7 @@ class TestGraphEdgeCases:
 # ===================================================================
 # 7. TestPriorityEdgeCases
 # ===================================================================
+
 
 class TestPriorityEdgeCases:
     """Priority and retention edge cases."""
@@ -810,7 +816,8 @@ class TestPriorityEdgeCases:
         # Get memory via raw query (bypasses get_memory which may filter)
         cursor = empty_db.conn.execute(
             "SELECT id, importance, created_at, accessed_at, access_count, "
-            "retention_strength FROM memories WHERE id = ?", (mid,)
+            "retention_strength FROM memories WHERE id = ?",
+            (mid,),
         )
         row = cursor.fetchone()
         assert row is not None
@@ -856,35 +863,25 @@ class TestPriorityEdgeCases:
         # High importance should beat low importance (both are new)
         assert p1 > p2
 
-    def test_eviction_methods_exist(self, empty_db: AriadneDB) -> None:
-        """Verify that evict/consolidate/stats are callable. Due to a source
-        indentation bug, these may not be exposed on the class."""
-        # evict and consolidate may be nested inside _cached_priority_score
-        # and thus inaccessible. This test documents current behavior.
-        has_evict = hasattr(empty_db, "evict")
-        has_consolidate = hasattr(empty_db, "consolidate")
-        has_stats = hasattr(empty_db, "stats")
+    def test_lifecycle_methods_callable(self, empty_db: AriadneDB) -> None:
+        """evict/consolidate/stats are first-class methods on AriadneDB and behave
+        sensibly on an empty database."""
+        assert callable(empty_db.evict)
+        assert callable(empty_db.consolidate)
+        assert callable(empty_db.stats)
 
-        # If any exist, they should be callable without error (or return sensible)
-        if has_evict:
-            result = empty_db.evict()
-            assert isinstance(result, int)
-        if has_consolidate:
-            result = empty_db.consolidate()
-            assert isinstance(result, int)
-        if has_stats:
-            result = empty_db.stats()
-            assert isinstance(result, dict)
-
-        # At minimum, verify the test doesn't crash
-        assert isinstance(has_evict, bool)
-        assert isinstance(has_consolidate, bool)
-        assert isinstance(has_stats, bool)
+        # Empty DB: no-op lifecycle calls return sensible values, no crash.
+        assert empty_db.evict() == 0
+        assert empty_db.consolidate() == 0
+        stats = empty_db.stats()
+        assert isinstance(stats, dict)
+        assert stats["active_memories"] == 0
 
 
 # ===================================================================
 # 8. TestDedupEdgeCases
 # ===================================================================
+
 
 class TestDedupEdgeCases:
     """Deduplication edge cases."""
@@ -900,14 +897,10 @@ class TestDedupEdgeCases:
 
     def test_one_word_different(self, empty_mem: AriadneMemory) -> None:
         """Text with one word different — may or may not be duplicate."""
-        r1 = empty_mem.remember(
-            "The quick brown fox jumps over the lazy dog", importance=0.5
-        )
+        r1 = empty_mem.remember("The quick brown fox jumps over the lazy dog", importance=0.5)
         assert r1["status"] == "created"
 
-        r2 = empty_mem.remember(
-            "The quick brown fox jumps over the sleepy dog", importance=0.5
-        )
+        r2 = empty_mem.remember("The quick brown fox jumps over the sleepy dog", importance=0.5)
         # With threshold 0.8, one-word difference may still be seen as similar
         assert r2["status"] in ("created", "duplicate")
 
@@ -1024,6 +1017,7 @@ class TestDedupEdgeCases:
 # Additional combined edge cases
 # ===================================================================
 
+
 class TestCombinedEdgeCases:
     """Tests that combine multiple edge cases."""
 
@@ -1047,16 +1041,19 @@ class TestCombinedEdgeCases:
         for mid in ids:
             assert empty_db.delete_memory(mid, hard=False) is True
 
-        cursor = empty_db.conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE is_deleted = 0"
-        )
+        cursor = empty_db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
         assert cursor.fetchone()[0] == 0
 
     def test_importance_clamp_edge(self, empty_db: AriadneDB) -> None:
         """Importance is clamped into [0, 1] at the boundaries and beyond."""
         cases = [
-            (0.0, 0.0), (1.0, 1.0), (-0.001, 0.0), (1.001, 1.0),
-            (0.5, 0.5), (-100.0, 0.0), (100.0, 1.0),
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (-0.001, 0.0),
+            (1.001, 1.0),
+            (0.5, 0.5),
+            (-100.0, 0.0),
+            (100.0, 1.0),
         ]
         for given, expected in cases:
             content = f"importance_test_val_{given}"
@@ -1095,9 +1092,7 @@ class TestCombinedEdgeCases:
             assert memory["content"] == "Persistent data"
 
             # Verify via raw SQL
-            cursor = mem2._db.conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE is_deleted = 0"
-            )
+            cursor = mem2._db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
             assert cursor.fetchone()[0] >= 1
             cursor = mem2._db.conn.execute("SELECT COUNT(*) FROM entities")
             assert cursor.fetchone()[0] >= 2
@@ -1120,6 +1115,7 @@ class TestCombinedEdgeCases:
             # Read a random previous one
             if i > 0:
                 import random
+
                 mid = random.choice(ids)
                 memory = empty_mem._db.get_memory(mid)
                 assert memory is not None

@@ -19,6 +19,13 @@ from arriadne.addons import (
     SearchFilter,
     GraphRelationship,
 )
+from arriadne.memory_manager import (
+    LLMMemoryManager,
+    ExtractionResult,
+    ExtractedMemory,
+    ExtractedRelation,
+)
+from arriadne.curator import MemoryCurator, CurateReport
 
 __all__ = [
     "AriadneConfig",
@@ -37,4 +44,10 @@ __all__ = [
     "APIRoute",
     "SearchFilter",
     "GraphRelationship",
+    "LLMMemoryManager",
+    "ExtractionResult",
+    "ExtractedMemory",
+    "ExtractedRelation",
+    "MemoryCurator",
+    "CurateReport",
 ]
