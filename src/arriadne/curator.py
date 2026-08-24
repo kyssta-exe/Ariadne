@@ -159,7 +159,7 @@ class MemoryCurator:
             params.append(ns)
 
         rows = db.conn.execute(
-            f"""SELECT id, content, created_at, importance
+            f"""SELECT id, content, created_at
                 FROM memories
                 WHERE is_deleted = 0
                   {ns_sql}
@@ -168,44 +168,55 @@ class MemoryCurator:
             (*params, k_scan),
         ).fetchall()
 
-        mems = [
-            {
-                "id": int(r[0]),
-                "content": str(r[1]),
-                "created_at": float(r[2]) if r[2] is not None else 0.0,
-                "importance": float(r[3] or 0.5),
-            }
+        # (id, content, created_at) tuples keep mypy strict happy and the scan
+        # readable; dicts of mixed value types degrade to `object`.
+        mems: list[tuple[int, str, float]] = [
+            (
+                int(r[0]),
+                str(r[1]),
+                float(r[2]) if r[2] is not None else 0.0,
+            )
             for r in rows
         ]
 
         resolved = 0
         for i, cand in enumerate(mems):
-            if db.get_memory(cand["id"]) is None:
+            if db.get_memory(cand[0]) is None:
                 continue
             # Compare against nearby newer entries only (cheap window).
             for other in mems[i + 1 : i + 20]:
-                if db.get_memory(other["id"]) is None:
+                if db.get_memory(other[0]) is None:
                     continue
-                conflicts = self._contradiction.detect_contradictions(
-                    cand["content"], other["content"]
-                )
+                conflicts = self._contradiction.detect_contradictions(cand[1], other[1])
                 if not conflicts:
                     continue
                 # The *newer* one wins; older gets superseded and soft-deleted.
-                newer, older = (
-                    (cand, other) if cand["created_at"] >= other["created_at"] else (other, cand)
-                )
-                self.memory.supersede(
-                    old_memory_id=older["id"],
-                    new_content=newer["content"],
+                newer, older = (cand, other) if cand[2] >= other[2] else (other, cand)
+                result = self.memory.supersede(
+                    old_memory_id=older[0],
+                    new_content=newer[1],
                     namespace=ns,
                 )
-                self.memory.forget(older["id"], hard=False)
+                self.memory.forget(older[0], hard=False)
+                # Trust scoring: the statement that survived a conflict gains a
+                # little confidence — being repeatedly reaffirmed through
+                # curation is evidence the memory is correct. supersede()
+                # re-materializes the winning content as a new row, so the
+                # reinforcement targets that row when it was created.
+                try:
+                    winner_id = None
+                    if isinstance(result, dict) and result.get("status") == "created":
+                        winner_id = result.get("memory_id")
+                    if winner_id is None:
+                        winner_id = newer[0]
+                    self.memory.reinforce(int(winner_id))
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Could not reinforce winner %d: %s", newer[0], exc)
                 resolved += 1
                 logger.info(
                     "Resolved contradiction: superseded %d with %d",
-                    older["id"],
-                    newer["id"],
+                    older[0],
+                    newer[0],
                 )
                 break  # one resolution per candidate keeps the scan linear-ish
 
@@ -263,7 +274,7 @@ class CuratorAddon(BaseAddon):
     def description(self) -> str:
         return "Retention, conflict-resolution, and consolidation pass over Ariadne memory."
 
-    def get_cli_commands(self):  # noqa: ANN201
+    def get_cli_commands(self) -> list[Any]:
         from arriadne.addons import CLICommand
 
         def _curate(args: Any) -> None:

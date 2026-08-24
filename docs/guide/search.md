@@ -236,3 +236,31 @@ hybrid_results = db.hybrid_search(
 db.close()
 ```
 
+## Composable retrieval pipelines
+
+`AriadneMemory.recall` is a tuned, fixed pipeline — the right default. When
+you need to customize the stages, `arriadne.retrievers` exposes the same
+primitives as composable pieces:
+
+- **First stages** (`retrieve(query, k, **filters)`): `FTSRetriever`,
+  `VectorRetriever`, `HybridRetriever` (the default pipeline, optionally with
+  a reranker).
+- **Decorators** (`apply(results, query)`): `RerankRetriever` (cross-encoder
+  re-scoring), `ExpansionRetriever` (entity-graph widening).
+- `Pipeline(first, *decorators)` composes them left-to-right.
+
+```python
+from arriadne.retrievers import (
+    Pipeline, HybridRetriever, RerankRetriever, ExpansionRetriever,
+)
+
+pipe = Pipeline(
+    HybridRetriever(mem),
+    RerankRetriever(reranker),        # second-stage re-scoring
+    ExpansionRetriever(mem, hops=1),  # widen through the entity graph
+)
+results = pipe.retrieve("how to deploy", k=5)
+```
+
+Custom stages just implement `apply(results, query)`; stage outputs stay in
+the standard memory-dict shape with `score` / `score_parts` intact.

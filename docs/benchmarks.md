@@ -25,6 +25,77 @@ The core operation: how fast can Ariadne find relevant memories?
 | **1,000** | **0.29 ms** p50 · 5.7 ms p99 | **1.69 ms** p50 · 2.8 ms p99 | **4.55 ms** p50 · 10.5 ms p99 | **7.54 ms** p50 · 13.8 ms p99 |
 | **5,000** | **0.63 ms** p50 · 6.8 ms p99 | **6.97 ms** p50 · 9.6 ms p99 | **9.14 ms** p50 · 13.6 ms p99 | **12.75 ms** p50 · 19.0 ms p99 |
 
+::: tip v0.13.0 retrieval speedup
+v0.13.0 removed the per-candidate `get_memory` round trips from hybrid/FTS/vector
+search (batch `IN` fetches), made namespace-filtered vector search widen its
+candidate window instead of scanning the whole index, and batched provenance
+attachment in `recall()`. On the same class of workload this cuts hybrid search
+by roughly 30% and FTS by ~17% at 1k memories (hybrid ≈2.8 ms, FTS ≈0.44 ms in
+the repo's probe on Windows/Python 3.13). The table above retains the original
+Linux measurements for comparability; reproduce either with
+[`scripts/perf_probe.py`](https://github.com/kyssta-exe/Ariadne/blob/main/scripts/perf_probe.py).
+:::
+
+### Startup and write throughput (v0.13.0, Windows / Python 3.13)
+
+v0.13.0 attacked the two lifecycle costs that actually hurt self-hosters:
+**restart time** and **write throughput at scale**. Fixes: FAISS + dedup index
+sidecars (fingerprint-validated, auto-fallback to rebuild), a 64 MB SQLite
+page cache (the default 2 MB thrashes once embeddings and indexes compete),
+WAL `synchronous=NORMAL`, tiered auto-maintenance (expensive consolidation
+runs every 10th cycle instead of every 50 writes), shared MinHash
+permutations, and one less row fetch per hybrid search.
+
+Measured with [`scripts/perf_scale.py`](https://github.com/kyssta-exe/Ariadne/blob/main/scripts/perf_scale.py), 384-dim vectors, 2 namespaces:
+
+| Metric | N | before | after | speedup |
+|---|---:|---:|---:|---:|
+| Startup (warm open) | 1,000 | 732 ms | 138 ms | **5.3×** |
+| Startup (warm open) | 5,000 | 3,561 ms | 413 ms | **8.6×** |
+| Startup (warm open) | 20,000 | 13,559 ms | ~831 ms | **16×** |
+| Bulk write | 1,000 | 1.09 ms | 0.80 ms | 1.4× |
+| Bulk write | 5,000 | 5.27 ms | 1.27 ms | **4.2×** |
+| Bulk write | 20,000 | 23.3 ms | 3.9 ms | **5.9×** |
+| Single write | 20,000 | 9.2 ms | 4.9 ms | 1.9× |
+| Full `recall()` | 20,000 | 4.0 ms | 3.8 ms | ~1.1× |
+
+"Before" numbers were captured on the same machine immediately prior to the
+changes. The sidecars are optimizations, never correctness requirements: any
+fingerprint mismatch (external edits, crashes, dimension changes) silently
+falls back to the full rebuild — covered by tests including corruption,
+staleness, and dimension-change cases.
+
+---
+
+## Retrieval Accuracy
+
+Latency without correctness is meaningless. v0.13.0 ships a deterministic
+accuracy harness,
+[`benchmarks/accuracy_eval.py`](https://github.com/kyssta-exe/Ariadne/blob/main/benchmarks/accuracy_eval.py):
+a synthetic corpus of unique-subject facts with paraphrased questions,
+temporal supersessions ("X moved cities"), same-shape distractors, and
+cross-namespace isolation checks. Fully deterministic — same score on every
+machine, no downloads.
+
+| Mode | Overall recall@5 | Exact | Paraphrase | Temporal | Namespace leak |
+|---|---:|---:|---:|---:|---:|
+| FTS-only (no embedder) | **0.950** | 1.000 | 0.900 | **1.000** | none |
+| Hybrid + real embeddings (all-MiniLM-L6-v2) | **0.948** | 1.000 | 0.895 | **1.000** | none |
+| Hybrid + hashing embedder¹ | 0.825 | 1.000 | 0.650 | 1.000 | none |
+
+Measured with `python benchmarks/accuracy_eval.py --embeddings --n 100`
+(sentence-transformers 6.0.0, CPU). On this corpus real embeddings match the
+FTS baseline: the questions are keyword-answerable, so the vector channel's
+advantage (vocabulary mismatch, cross-lingual, abstraction) doesn't
+differentiate — the two channels agreeing at ~0.95 is the signal that the
+hybrid path is wired correctly end-to-end.
+
+¹ The dependency-free char-trigram hashing embedder is a stand-in used by CI
+to exercise the hybrid path deterministically without model downloads.
+
+The harness runs as a regression floor in CI (`tests/test_accuracy_eval.py`):
+exact ≥ 0.95, temporal = 1.0, zero namespace leaks.
+
 ### What each column measures
 
 | Operation | Pipeline |

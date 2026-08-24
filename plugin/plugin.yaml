@@ -1,5 +1,5 @@
 name: ariadne
-version: 0.1.2
+version: 0.13.0
 description: "Ariadne memory provider for Hermes — FAISS vector search + FTS5 + knowledge graph + cognitive retention. Zero cloud, zero daemon."
 author: Kyssta
 provides_tools:

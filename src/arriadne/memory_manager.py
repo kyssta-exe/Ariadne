@@ -202,6 +202,58 @@ def _normalise_importance(value: Any, default: float = 0.5) -> float:
     return max(0.0, min(1.0, v))
 
 
+_WORD_RE = re.compile(r"\w{3,}")
+
+
+def _token_set(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.lower()))
+
+
+def _token_jaccard(a: str, b: str) -> float:
+    """Deterministic lexical similarity in [0, 1] used by the update policy."""
+    sa, sb = _token_set(a), _token_set(b)
+    if not sa and not sb:
+        return 0.0
+    union = sa | sb
+    return len(sa & sb) / len(union) if union else 0.0
+
+
+# Update-policy similarity thresholds. ``SIMILAR`` is the bar for "this new
+# fact is about the same thing as a stored memory"; at or above ``NEAR_DUP``
+# the texts are treated as the same statement (NOOP).
+UPDATE_SIMILAR_THRESHOLD = 0.35
+UPDATE_NEAR_DUP_THRESHOLD = 0.75
+
+
+@dataclass
+class PolicyDecision:
+    """Outcome of one update-policy evaluation (mem0-style ADD/UPDATE/DELETE/NOOP).
+
+    Attributes:
+        operation: ``ADD`` | ``UPDATE`` | ``DELETE`` | ``NOOP``.
+        target_id: Existing memory id for UPDATE/DELETE/NOOP, else None.
+        reason: Short human-readable justification.
+        similarity: Lexical similarity with the closest stored memory (0 when
+            no candidate was found).
+        contradicted: Whether the closest stored memory contradicts the new one.
+    """
+
+    operation: str
+    target_id: int | None = None
+    reason: str = ""
+    similarity: float = 0.0
+    contradicted: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "operation": self.operation,
+            "target_id": self.target_id,
+            "reason": self.reason,
+            "similarity": round(self.similarity, 3),
+            "contradicted": self.contradicted,
+        }
+
+
 def _parse_extraction(text: str) -> ExtractionResult:
     """Turn an LLM JSON reply into an :class:`ExtractionResult`.
 
@@ -368,6 +420,142 @@ class LLMMemoryManager:
             kwargs["supersedes_id"] = prior_id
 
         result = memory.remember(**kwargs)
+        if prior_id is not None:
+            result["superseded_id"] = prior_id
+        return result
+
+    # -- Update policy (mem0-style ADD / UPDATE / DELETE / NOOP) -----------
+
+    def decide_update_policy(
+        self,
+        content: str,
+        *,
+        namespace: str | None = None,
+    ) -> PolicyDecision:
+        """Decide how ``content`` should be applied against stored memories.
+
+        Deterministic (no extra LLM call): the closest active memory in the
+        namespace is found via ``recall``; lexical similarity plus the
+        contradiction detector pick the operation.
+
+        - no similar memory (similarity < 0.35) -> ``ADD``
+        - contradicts the stored memory -> ``UPDATE`` (supersede, history kept)
+        - near-duplicate (similarity >= 0.75, no conflict) -> ``NOOP``
+        - similar but additive -> ``ADD``
+
+        ``DELETE`` is never invented here — it is only applied when a caller
+        (e.g. an LLM judge) passes an explicit decision to ``apply_policy``.
+        """
+        ns = namespace or self.default_namespace
+        candidates = self.memory.recall(content, k=5, namespace=ns)
+
+        best: dict[str, Any] | None = None
+        best_sim = 0.0
+        for cand in candidates:
+            if cand.get("is_deleted"):
+                continue
+            sim = _token_jaccard(content, cand.get("content", ""))
+            if sim > best_sim:
+                best_sim, best = sim, cand
+
+        if best is None or best_sim < UPDATE_SIMILAR_THRESHOLD:
+            return PolicyDecision(
+                operation="ADD",
+                reason="no similar stored memory",
+                similarity=best_sim,
+            )
+
+        # Local import keeps the module's documented import weight unchanged.
+        from arriadne.dedup import ContradictionDetector
+
+        contradicted = bool(
+            ContradictionDetector().detect_contradictions(content, best.get("content", ""))
+        )
+        if contradicted:
+            return PolicyDecision(
+                operation="UPDATE",
+                target_id=best["id"],
+                reason="contradicts stored memory",
+                similarity=best_sim,
+                contradicted=True,
+            )
+        if best_sim >= UPDATE_NEAR_DUP_THRESHOLD:
+            return PolicyDecision(
+                operation="NOOP",
+                target_id=best["id"],
+                reason="near-duplicate of stored memory",
+                similarity=best_sim,
+            )
+        return PolicyDecision(
+            operation="ADD",
+            reason="similar but not contradictory",
+            similarity=best_sim,
+        )
+
+    def apply_policy(
+        self,
+        extracted: ExtractedMemory,
+        decision: PolicyDecision | None = None,
+        *,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one extracted memory according to an update-policy decision.
+
+        ``ADD`` writes a new memory, ``UPDATE`` supersedes the target (history
+        preserved), ``DELETE`` soft-deletes the target, ``NOOP`` skips.
+        Pass an explicit ``decision`` to override the deterministic one (this
+        is the hook an LLM judge would use).
+        """
+        ns = namespace or self.default_namespace
+        memory = self.memory
+        if decision is None:
+            decision = self.decide_update_policy(extracted.content, namespace=ns)
+
+        metadata = {
+            **(extracted.metadata or {}),
+            "extracted": True,
+            "kind": extracted.kind,
+            "fact_subject": extracted.subject,
+            "fact_attribute": extracted.attribute,
+            "fact_value": extracted.value,
+        }
+
+        if decision.operation == "DELETE":
+            if decision.target_id is None:
+                return {"status": "error", "error": "DELETE decision without target_id"}
+            ok = memory.forget(decision.target_id, hard=False)
+            return {
+                "status": "deleted" if ok else "error",
+                "memory_id": decision.target_id,
+                "decision": decision.as_dict(),
+            }
+
+        if decision.operation == "NOOP":
+            return {
+                "status": "noop",
+                "memory_id": decision.target_id,
+                "decision": decision.as_dict(),
+            }
+
+        if decision.operation == "UPDATE" and decision.target_id is not None:
+            result = memory.supersede(
+                old_memory_id=decision.target_id,
+                new_content=extracted.content,
+                namespace=ns,
+            )
+            result["decision"] = decision.as_dict()
+            return result
+
+        # ADD (default, and the fallback for malformed decisions)
+        result = memory.remember(
+            content=extracted.content,
+            memory_type=extracted.kind if extracted.kind != "preference" else "semantic",
+            importance=extracted.importance,
+            entities=extracted.entities or None,
+            metadata=metadata,
+            namespace=ns,
+        )
+        result["decision"] = decision.as_dict()
         return result
 
     # -- Turn processing -----------------------------------------------------
@@ -381,18 +569,28 @@ class LLMMemoryManager:
         record_episode: bool = True,
         add_relations: bool = True,
         extract_prompt: str | None = None,
+        update_policy: bool = True,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """Process one conversation turn: record it, extract, and persist.
 
         Steps:
         1. Optionally record the raw turn as an immutable episode (provenance).
         2. Run the extraction pass.
-        3. Write each memory (dedup-aware) with its entities attached.
+        3. Write each memory through the update policy: KV facts upsert via
+           ``set_fact``; other memories get a deterministic ADD / UPDATE / NOOP
+           decision against the closest stored memory (mem0-style conflict
+           resolution).
         4. Link extracted relations into the knowledge graph.
         5. Return a summary of what was stored.
 
-        Returns a dict with ``episode_id``, ``stored`` (list of ids), ``duplicates``,
-        ``skipped``, and ``relations_added``.
+        Args:
+            session_id: Tag episodes (and written memories) with a session id
+                so ``list_sessions`` / ``digest_session`` can target them.
+
+        Returns a dict with ``episode_id``, ``stored`` (list of ids),
+        ``duplicates``, ``skipped``, ``relations_added``, and ``policy``
+        (per-memory operation log).
         """
         ns = namespace or self.default_namespace
         memory = self.memory
@@ -402,6 +600,7 @@ class LLMMemoryManager:
             "duplicates": [],
             "skipped": [],
             "relations_added": 0,
+            "policy": [],
         }
 
         if record_episode and (user.strip() or assistant.strip()):
@@ -409,6 +608,7 @@ class LLMMemoryManager:
                 content=f"user: {user}\nassistant: {assistant}".strip(),
                 role="turn",
                 namespace=ns,
+                session_id=session_id,
             )
             summary["episode_id"] = ep.get("episode_id")
 
@@ -418,6 +618,50 @@ class LLMMemoryManager:
             if m.importance < self.min_importance:
                 summary["skipped"].append(m.content)
                 continue
+
+            if update_policy and m.is_fact:
+                # KV facts have a precise upsert path: subject+attribute match
+                # instead of lexical similarity.
+                call = self.set_fact(
+                    m.subject or "",
+                    m.attribute or "",
+                    m.value if m.value is not None else "",
+                    importance=m.importance,
+                    namespace=ns,
+                )
+                operation = "UPDATE" if call.get("superseded_id") else "ADD"
+                summary["policy"].append(
+                    {
+                        "content": m.content,
+                        "operation": operation,
+                        "target_id": call.get("superseded_id"),
+                    }
+                )
+                if call.get("status") == "created" and call.get("memory_id") is not None:
+                    summary["stored"].append(call["memory_id"])
+                elif call.get("status") == "duplicate":
+                    summary["duplicates"].append(
+                        {"content": m.content, "duplicate_of": call.get("duplicate_of")}
+                    )
+                continue
+
+            if update_policy:
+                call = self.apply_policy(m, namespace=ns)
+                decision = call.get("decision") or {}
+                summary["policy"].append({"content": m.content, **decision})
+                status = call.get("status")
+                if status == "created" and call.get("memory_id") is not None:
+                    summary["stored"].append(call["memory_id"])
+                elif status == "noop":
+                    summary["duplicates"].append(
+                        {"content": m.content, "duplicate_of": call.get("memory_id")}
+                    )
+                elif status == "duplicate":
+                    summary["duplicates"].append(
+                        {"content": m.content, "duplicate_of": call.get("duplicate_of")}
+                    )
+                continue
+
             call = memory.remember(
                 content=m.content,
                 memory_type=m.kind if m.kind != "preference" else "semantic",

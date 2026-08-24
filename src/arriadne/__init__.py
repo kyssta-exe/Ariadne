@@ -2,52 +2,59 @@
 
 from __future__ import annotations
 
-__version__ = "0.12.1"
+__version__ = "0.13.0"
 __author__ = "Mantes"
 
-from arriadne.config import AriadneConfig
-from arriadne.interface import AriadneMemory
-from arriadne.storage import AriadneDB
-from arriadne.dedup import Deduplicator, ContradictionDetector
-from arriadne.embeddings import Embedder, SentenceTransformerEmbedder
-from arriadne.addons import BaseAddon, ExtractorBase, EntityType
 from arriadne.addons import (
     AddonRegistry,
-    ExtractionError,
-    CLICommand,
     APIRoute,
-    SearchFilter,
+    BaseAddon,
+    CLICommand,
+    EntityType,
+    ExtractionError,
+    ExtractorBase,
     GraphRelationship,
+    SearchFilter,
 )
+from arriadne.async_api import AsyncAriadneMemory
+from arriadne.config import AriadneConfig
+from arriadne.curator import CurateReport, MemoryCurator
+from arriadne.dedup import ContradictionDetector, Deduplicator
+from arriadne.embeddings import Embedder, SentenceTransformerEmbedder
+from arriadne.interface import AriadneMemory
 from arriadne.memory_manager import (
-    LLMMemoryManager,
-    ExtractionResult,
     ExtractedMemory,
     ExtractedRelation,
+    ExtractionResult,
+    LLMMemoryManager,
 )
-from arriadne.curator import MemoryCurator, CurateReport
+from arriadne.rerank import CrossEncoderReranker, Reranker
+from arriadne.storage import AriadneDB
 
 __all__ = [
+    "APIRoute",
+    "AddonRegistry",
     "AriadneConfig",
     "AriadneDB",
     "AriadneMemory",
-    "Deduplicator",
-    "ContradictionDetector",
-    "Embedder",
-    "SentenceTransformerEmbedder",
+    "AsyncAriadneMemory",
     "BaseAddon",
-    "ExtractorBase",
-    "EntityType",
-    "AddonRegistry",
-    "ExtractionError",
     "CLICommand",
-    "APIRoute",
-    "SearchFilter",
-    "GraphRelationship",
-    "LLMMemoryManager",
-    "ExtractionResult",
+    "ContradictionDetector",
+    "CrossEncoderReranker",
+    "CurateReport",
+    "Deduplicator",
+    "Embedder",
+    "EntityType",
     "ExtractedMemory",
     "ExtractedRelation",
+    "ExtractionError",
+    "ExtractionResult",
+    "ExtractorBase",
+    "GraphRelationship",
+    "LLMMemoryManager",
     "MemoryCurator",
-    "CurateReport",
+    "Reranker",
+    "SearchFilter",
+    "SentenceTransformerEmbedder",
 ]

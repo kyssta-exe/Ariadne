@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, cast
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,7 @@ class BaseAddon(ABC):
 
     # -- Lifecycle ------------------------------------------------------------
 
-    def initialize(self, config: Any = None) -> None:
+    def initialize(self, config: Any = None) -> None:  # noqa: B027 - optional hook
         """Called once after instantiation.  *config* is the active
         :class:`~arriadne.config.AriadneConfig` (or ``None``).
 
@@ -250,7 +251,7 @@ class BaseAddon(ABC):
         (opening connections, loading models, etc.).
         """
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> None:  # noqa: B027 - optional hook
         """Called when the host is tearing down.
 
         Override this to release resources (close connections, flush

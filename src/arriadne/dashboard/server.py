@@ -24,10 +24,9 @@ from arriadne.interface import AriadneMemory
 # ---------------------------------------------------------------------------
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, Request
+    from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-    from fastapi import UploadFile
     from fastapi.staticfiles import StaticFiles
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(
@@ -183,14 +182,14 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
                 ORDER BY m.{sort} {order_dir}
                 LIMIT ? OFFSET ?
             """
-            rows = conn.execute(data_sql, [fts_q] + params + [per_page, offset]).fetchall()
+            rows = conn.execute(data_sql, [fts_q, *params, per_page, offset]).fetchall()
             # Recount with search filter
             total_sql = f"""
                 SELECT COUNT(*) FROM memories m
                 JOIN memories_fts fts ON fts.rowid = m.id
                 WHERE memories_fts MATCH ? AND {where_sql}
             """
-            total = conn.execute(total_sql, [fts_q] + params).fetchone()[0]
+            total = conn.execute(total_sql, [fts_q, *params]).fetchone()[0]
         else:
             data_sql = f"""
                 SELECT m.id, m.content, m.memory_type, m.importance,
@@ -201,7 +200,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
                 ORDER BY m.{sort} {order_dir}
                 LIMIT ? OFFSET ?
             """
-            rows = conn.execute(data_sql, params + [per_page, offset]).fetchall()
+            rows = conn.execute(data_sql, [*params, per_page, offset]).fetchall()
 
         memories = []
         for r in rows:
@@ -303,6 +302,51 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
             type_filter=type if type else None,
         )
         return {"results": _jsonable(results)}
+
+    @app.get("/api/sessions")
+    def api_sessions(q: str = Query(""), k: int = Query(20, ge=1, le=100)) -> Any:
+        """List recorded sessions, or search raw episode history with ``q``."""
+        if q.strip():
+            results = mem.search_episodes(q, k=k)
+            return {"mode": "search", "results": _jsonable(results)}
+        return {"mode": "list", "sessions": _jsonable(mem.list_sessions(limit=k))}
+
+    @app.post("/api/sessions/digest")
+    async def api_sessions_digest(request: Request) -> Any:
+        """Digest a session's episodes into a compact digest memory."""
+        body = await request.json()
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+        result = mem.digest_session(
+            session_id,
+            namespace=str(body.get("namespace") or "default"),
+            force=bool(body.get("force", False)),
+        )
+        return _jsonable(result)
+
+    @app.get("/api/core-blocks")
+    def api_core_blocks_list() -> Any:
+        """List the core memory blocks (always-in-context working state)."""
+        return {"blocks": _jsonable(mem.core_blocks())}
+
+    @app.put("/api/core-blocks/{name}")
+    async def api_core_blocks_set(name: str, request: Request) -> Any:
+        """Create or replace a core memory block."""
+        body = await request.json()
+        content = body.get("content")
+        if not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="content must be a string")
+        block = mem.core_set(name, content)
+        return _jsonable(block)
+
+    @app.delete("/api/core-blocks/{name}")
+    def api_core_blocks_delete(name: str) -> Any:
+        """Delete a core memory block."""
+        deleted = mem.core_delete(name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="block not found")
+        return {"deleted": True, "name": name}
 
     @app.get("/api/graph")
     def api_graph(
@@ -681,7 +725,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         db_size_kb = round(db_path.stat().st_size / 1024, 1) if db_path.exists() else 0
 
         decay_candidates = conn.execute(
-            """SELECT COUNT(*) FROM memories 
+            """SELECT COUNT(*) FROM memories
                WHERE is_deleted = 0 AND created_at < ? AND importance < 0.3""",
             (now - 2592000,),
         ).fetchone()[0]
@@ -737,7 +781,8 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         placeholders = ",".join("?" * len(neighbor_ids))
         nodes = []
         for row in conn.execute(
-            f"SELECT id, content, memory_type, importance FROM memories WHERE id IN ({placeholders}) AND is_deleted = 0",
+            f"SELECT id, content, memory_type, importance FROM memories "
+            f"WHERE id IN ({placeholders}) AND is_deleted = 0",
             tuple(neighbor_ids),
         ).fetchall():
             d = dict(row)
@@ -753,8 +798,8 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
 
         edges = []
         for row in conn.execute(
-            f"""SELECT source_id, target_id, link_type, strength 
-                FROM memory_links 
+            f"""SELECT source_id, target_id, link_type, strength
+                FROM memory_links
                 WHERE source_id IN ({placeholders}) AND target_id IN ({placeholders})""",
             tuple(neighbor_ids) * 2,
         ).fetchall():

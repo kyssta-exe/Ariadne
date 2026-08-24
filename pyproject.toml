@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arriadne"
-version = "0.12.1"
+version = "0.13.0"
 description = "AI agent memory system — sub-millisecond hybrid search (FAISS vector + FTS5 keyword + RRF fusion), knowledge graph traversal, cognitive retention modeling, and auto-deduplication. Zero infrastructure."
 readme = "README.md"
 license = "MIT"
@@ -113,6 +113,33 @@ module = [
 # dynamic type creation + protocol subscripts in adapters
 disable_error_code = ["misc", "override", "no-any-return"]
 
+[[tool.mypy.overrides]]
+module = ["arriadne.integrations.openai_agents"]
+# @function_tool is untyped when openai-agents is absent (decorator is None)
+disable_error_code = ["untyped-decorator"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+
+[tool.ruff.lint]
+# Explicit rule set so lint results are stable across ruff releases (the
+# default rule set has expanded over time and broke CI on upgrade).
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # import sorting
+    "UP",  # pyupgrade (modernize syntax for py310+)
+    "B",   # bugbear (likely bugs)
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    # The facade layers deliberately catch broadly, log, and return a safe
+    # fallback ([]) rather than crashing an agent mid-turn.
+    "BLE001",
+    # Defensive try/except-pass around optional-dependency imports and
+    # best-effort side effects (dedup index updates, WAL checkpoints).
+    "S110",
+    "S112",
+]

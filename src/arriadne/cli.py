@@ -407,7 +407,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     try:
         import json
 
-        with open(args.source, "r") as f:
+        with open(args.source) as f:
             data = json.load(f)
         config = AriadneConfig(db_path=args.db_path)
         mem = AriadneMemory(config=config)
@@ -516,6 +516,141 @@ def cmd_list(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_sessions(args: argparse.Namespace) -> int:
+    """Search raw session history, or list sessions when no query is given."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+
+        if args.query:
+            results = mem.search_episodes(
+                args.query, k=args.limit, namespace=args.namespace
+            )
+            mem.close()
+            print(f"Episode matches (showing {len(results)}):")
+            for ep in results:
+                ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(ep.get("event_at") or 0))
+                text = " ".join((ep.get("content") or "").split())[:110]
+                print(f"  [{ts}] session={ep.get('session_id')} role={ep.get('role')}")
+                print(f"         {text!r}")
+            return 0
+
+        sessions = mem.list_sessions(namespace=args.namespace, limit=args.limit)
+        mem.close()
+        if not sessions:
+            print("No recorded sessions yet (episodes are recorded via "
+                  "process_turn/record_episode).")
+            return 0
+        print(f"Sessions (showing {len(sessions)}):")
+        for s in sessions:
+            ts = time.strftime(
+                "%Y-%m-%d %H:%M", time.localtime(s.get("last_event_at") or 0)
+            )
+            print(f"  [{ts}] session={s['session_id']}  turns={s['turns']}")
+        return 0
+    except Exception as e:
+        print(f"Error searching sessions: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Run self-hoster diagnostics: integrity, index health, orphans, drift."""
+    checks: list[tuple[str, bool, str]] = []
+    db_path = Path(args.db_path)
+    checks.append((
+        "database file exists",
+        db_path.exists(),
+        str(db_path),
+    ))
+    if not db_path.exists():
+        for name, ok, detail in checks:
+            print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+        return 1
+
+    config = AriadneConfig(db_path=db_path, embedding_dim=args.dim)
+    mem = AriadneMemory(config=config)
+    conn = mem._db.conn
+
+    integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    checks.append(("sqlite integrity", integrity == "ok", str(integrity)))
+
+    active, vectors = conn.execute(
+        "SELECT COUNT(*), COUNT(embedding) FROM memories WHERE is_deleted = 0"
+    ).fetchone()
+    checks.append(("active memories", True, str(active)))
+    index_vectors = mem._db._faiss_index.ntotal if mem._db._faiss_index else 0
+    checks.append((
+        "faiss vector count matches db",
+        index_vectors == vectors,
+        f"index={index_vectors} db={vectors}",
+    ))
+
+    fts_rows = conn.execute(
+        """SELECT COUNT(*) FROM memories m WHERE m.is_deleted = 0 AND NOT EXISTS
+           (SELECT 1 FROM memories_fts f WHERE f.rowid = m.id)"""
+    ).fetchone()[0]
+    checks.append(("no memories missing from FTS", fts_rows == 0, f"missing={fts_rows}"))
+
+    orphans = conn.execute(
+        """SELECT COUNT(*) FROM sources s LEFT JOIN memories m ON m.id = s.memory_id
+           WHERE m.id IS NULL"""
+    ).fetchone()[0]
+    checks.append(("no orphaned provenance rows", orphans == 0, f"orphans={orphans}"))
+
+    sidecar = Path(str(db_path) + ".faiss")
+    checks.append((
+        "faiss sidecar present (fast startup)",
+        sidecar.exists(),
+        str(sidecar.name) if sidecar.exists() else "will rebuild on close",
+    ))
+
+    dim_mismatch = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL"
+    ).fetchone()[0]
+    checks.append((
+        "configured embedding dim plausible",
+        True,
+        f"dim={config.embedding_dim}, vector rows={dim_mismatch}",
+    ))
+
+    mem.close()
+    failed = 0
+    print("Ariadne doctor")
+    for name, ok, detail in checks:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+        if not ok:
+            failed += 1
+    print(f"{len(checks) - failed}/{len(checks)} checks passed")
+    return 1 if failed else 0
+
+
+def cmd_digest(args: argparse.Namespace) -> int:
+    """Distill a session's episodes into a compact digest memory."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        result = mem.digest_session(
+            args.session,
+            namespace=args.namespace,
+            max_turns=args.max_turns,
+            force=args.force,
+        )
+        mem.close()
+
+        status = result.get("status")
+        if status == "empty":
+            print(f"No episodes recorded for session {args.session!r}.")
+            return 1
+        print(f"Digest {status}: memory_id={result.get('memory_id')} "
+              f"episodes={result.get('episodes')}")
+        print()
+        print(result.get("digest") or "")
+        return 0
+    except Exception as e:
+        print(f"Error digesting session: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_purge(args: argparse.Namespace) -> int:
     """Purge (permanently delete) soft-deleted memories.
 
@@ -545,7 +680,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         Exit code (0 for success).
     """
     try:
-        import uvicorn  # noqa: F401  — lazy import
+        import uvicorn
     except ImportError:
         print(
             "uvicorn is required for the dashboard.  "
@@ -669,6 +804,29 @@ def main(argv: list[str] | None = None) -> int:
     list_parser.add_argument("--type", help="Filter by memory type")
     list_parser.add_argument("--namespace", help="Filter by namespace")
 
+    # sessions
+    sessions_parser = subparsers.add_parser(
+        "sessions", help="Search raw session history, or list sessions"
+    )
+    sessions_parser.add_argument("query", nargs="?", help="Search query (omit to list sessions)")
+    sessions_parser.add_argument(
+        "-n", "--limit", type=int, default=10, help="Max results (default: 10)"
+    )
+    sessions_parser.add_argument("--namespace", help="Filter by namespace")
+
+    # digest
+    digest_parser = subparsers.add_parser(
+        "digest", help="Distill a session's episodes into a digest memory"
+    )
+    digest_parser.add_argument("session", help="Session id to digest")
+    digest_parser.add_argument("--namespace", default="default", help="Namespace of the session")
+    digest_parser.add_argument(
+        "--max-turns", type=int, default=None, help="Max turns kept in the digest"
+    )
+    digest_parser.add_argument(
+        "--force", action="store_true", help="Re-digest even if one exists (supersedes old)"
+    )
+
     # purge
     purge_parser = subparsers.add_parser("purge", help="Permanently purge soft-deleted memories")
     purge_parser.add_argument(
@@ -691,6 +849,14 @@ def main(argv: list[str] | None = None) -> int:
         "--no-safety-backup",
         action="store_true",
         help="Skip creating a safety backup before restoring",
+    )
+
+    # doctor
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="Run self-hoster diagnostics (integrity, index health, drift)"
+    )
+    doctor_parser.add_argument(
+        "--dim", type=int, default=384, help="Embedding dim the store was built with"
     )
 
     # dashboard
@@ -728,6 +894,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_curate(args)
         case "list":
             return cmd_list(args)
+        case "sessions":
+            return cmd_sessions(args)
+        case "digest":
+            return cmd_digest(args)
+        case "doctor":
+            return cmd_doctor(args)
         case "purge":
             return cmd_purge(args)
         case "backup":

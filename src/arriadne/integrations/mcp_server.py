@@ -31,8 +31,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from .. import AriadneMemory
 from ..embeddings import SentenceTransformerEmbedder
@@ -66,6 +67,14 @@ _TOOL_SCHEMAS: dict[str, ToolDef] = {
                 "k": {"type": "integer", "description": "Max results.", "default": 5},
                 "namespace": {"type": "string", "description": "Memory namespace."},
                 "memory_type": {"type": "string", "description": "Optional memory-type filter."},
+                "rerank": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Cross-encoder rerank of the final set "
+                        "(needs the embeddings extra)."
+                    ),
+                },
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -118,6 +127,116 @@ _TOOL_SCHEMAS: dict[str, ToolDef] = {
         input_schema={
             "type": "object",
             "properties": {},
+            "additionalProperties": False,
+        },
+    ),
+    "ariadne_search_sessions": ToolDef(
+        name="ariadne_search_sessions",
+        description=(
+            "Search raw session history (recorded turns) by keyword. Use for "
+            "'what did I try/say last session' questions where distilled "
+            "memories are not enough."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "k": {"type": "integer", "description": "Max results.", "default": 5},
+                "namespace": {"type": "string"},
+                "session_id": {"type": "string", "description": "Optional session filter."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    ),
+    "ariadne_digest_session": ToolDef(
+        name="ariadne_digest_session",
+        description=(
+            "Distill a session's recorded turns into a compact digest memory "
+            "(deterministic, no LLM). Call at session end so the next session "
+            "starts with continuity."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Session to digest."},
+                "namespace": {"type": "string"},
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Re-digest even if a digest exists.",
+                },
+            },
+            "required": ["session_id"],
+            "additionalProperties": False,
+        },
+    ),
+    "ariadne_session_context": ToolDef(
+        name="ariadne_session_context",
+        description=(
+            "Get a compact 'recent session context' block built from stored "
+            "session digests. Call at session start for continuity."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "namespace": {"type": "string"},
+                "max_sessions": {"type": "integer", "default": 3},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    "ariadne_core_view": ToolDef(
+        name="ariadne_core_view",
+        description=(
+            "View the core memory blocks — the always-in-context working "
+            "state (persona, user profile, project state). Pass a block name "
+            "to view one block."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Optional block name."},
+                "namespace": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    "ariadne_core_append": ToolDef(
+        name="ariadne_core_append",
+        description=(
+            "Append an observation to a core memory block (created if "
+            "missing). Use for durable facts about the user, project, or "
+            "agent that should sit in every prompt."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Block name, e.g. 'user_profile' or 'project_state'.",
+                },
+                "text": {"type": "string", "description": "Text to append."},
+                "namespace": {"type": "string"},
+            },
+            "required": ["name", "text"],
+            "additionalProperties": False,
+        },
+    ),
+    "ariadne_core_replace": ToolDef(
+        name="ariadne_core_replace",
+        description=(
+            "Replace the full content of a core memory block. Use when a "
+            "fact changed and the old value should not linger."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "content": {"type": "string", "description": "New full content."},
+                "namespace": {"type": "string"},
+            },
+            "required": ["name", "content"],
             "additionalProperties": False,
         },
     ),
@@ -270,6 +389,7 @@ def _handle_recall(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, 
         k=int(args.get("k") or 5),
         namespace=_ns(args, server),
         type_filter=args.get("memory_type"),
+        rerank=bool(args.get("rerank", False)),
     )
     return {
         "count": len(results),
@@ -329,11 +449,93 @@ def _handle_stats(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, A
     }
 
 
+def _handle_search_sessions(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, Any]:
+    query = args.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query is required and must be a non-empty string")
+    results = server.memory.search_episodes(
+        query=query,
+        k=int(args.get("k") or 5),
+        namespace=_ns(args, server),
+        session_id=args.get("session_id"),
+    )
+    return {
+        "count": len(results),
+        "results": [
+            {
+                "id": ep.get("id"),
+                "content": ep.get("content"),
+                "role": ep.get("role"),
+                "session_id": ep.get("session_id"),
+                "event_at": ep.get("event_at"),
+                "score": ep.get("score"),
+            }
+            for ep in results
+        ],
+    }
+
+
+def _handle_digest_session(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, Any]:
+    session_id = args.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("session_id is required and must be a non-empty string")
+    return server.memory.digest_session(
+        session_id=session_id,
+        namespace=_ns(args, server),
+        force=bool(args.get("force", False)),
+    )
+
+
+def _handle_session_context(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, Any]:
+    context = server.memory.session_context(
+        namespace=_ns(args, server),
+        max_sessions=int(args.get("max_sessions") or 3),
+    )
+    return {"context": context, "empty": not bool(context)}
+
+
+def _handle_core_view(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, Any]:
+    ns = _ns(args, server)
+    name = args.get("name")
+    if isinstance(name, str) and name.strip():
+        block = server.memory.core_get(name.strip(), namespace=ns)
+        return {"block": block}
+    return {"blocks": server.memory.core_blocks(namespace=ns)}
+
+
+def _handle_core_append(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, Any]:
+    name = args.get("name")
+    text = args.get("text")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name is required and must be a non-empty string")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text is required and must be a non-empty string")
+    block = server.memory.core_append(name.strip(), text, namespace=_ns(args, server))
+    return {"status": "appended", "name": block["name"], "length": len(block["content"])}
+
+
+def _handle_core_replace(server: AriadneMCPServer, args: dict[str, Any]) -> dict[str, Any]:
+    name = args.get("name")
+    content = args.get("content")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name is required and must be a non-empty string")
+    if not isinstance(content, str):
+        raise ValueError("content is required and must be a string")
+    block = server.memory.core_set(name.strip(), content, namespace=_ns(args, server))
+    return {"status": "replaced", "name": block["name"], "length": len(block["content"])}
+
+
 _TOOL_HANDLERS: dict[str, Callable[[AriadneMCPServer, dict[str, Any]], dict[str, Any]]] = {
     "ariadne_recall": _handle_recall,
     "ariadne_remember": _handle_remember,
     "ariadne_forget": _handle_forget,
     "ariadne_stats": _handle_stats,
+    "ariadne_search_sessions": _handle_search_sessions,
+    "ariadne_digest_session": _handle_digest_session,
+    "ariadne_session_context": _handle_session_context,
+    "ariadne_core_view": _handle_core_view,
+    "ariadne_core_append": _handle_core_append,
+    "ariadne_core_replace": _handle_core_replace,
 }
 
 

@@ -192,7 +192,7 @@ def test_hybrid_search_ranks_higher_confidence_first(tmp_path: Path) -> None:
         )
         ids = [r["id"] for r in results]
         assert high_id in ids and low_id in ids
-        assert [r["id"] for r in results][0] == high_id, ids
+        assert next(r["id"] for r in results) == high_id, ids
         parts = results[0]["score_parts"]
         assert parts["confidence"] == 1.0
         assert parts["confidence_weight"] == 1.0

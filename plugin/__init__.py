@@ -58,6 +58,7 @@ class AriadneMemoryProvider(MemoryProvider):
         self._prefetch_cache: List[Dict] = []
         self._prefetch_cache_key: tuple[str, str] | None = None
         self._prefetch_timestamp = 0.0
+        self._session_context_injected = False
 
     # ── MemoryProvider interface ──────────────────────────────────────
 
@@ -83,6 +84,7 @@ class AriadneMemoryProvider(MemoryProvider):
         self._prefetch_cache = []
         self._prefetch_cache_key = None
         self._prefetch_timestamp = 0.0
+        self._session_context_injected = False
 
         # Primary DB
         db_dir = os.path.join(hermes_home, "ariadne")
@@ -211,19 +213,46 @@ class AriadneMemoryProvider(MemoryProvider):
         """Return static system prompt block for Ariadne."""
         return ""  # No static block; memories are injected per-turn via prefetch()
 
+    def _core_block_section(self) -> str:
+        """Render the global core memory blocks, or '' when none exist."""
+        if not self._ariadne:
+            return ""
+        try:
+            return self._ariadne.core_pack(
+                namespace=self._namespace_for("global"), char_budget=3000
+            )
+        except Exception as e:
+            logger.debug("Core block section failed: %s", e)
+            return ""
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Recall relevant memories before each turn."""
         if not self._ariadne or not query.strip():
             return ""
 
         key = (query.strip(), session_id or self._session_id)
+        # Core memory blocks are always-in-context working state (persona,
+        # user profile, project state) — prepended to every turn, Letta-style.
+        # Cross-session continuity (recent session digests) is injected once
+        # per session instead.
+        prefix_parts = [self._core_block_section()]
+        if not self._session_context_injected:
+            self._session_context_injected = True
+            try:
+                prefix_parts.append(self._ariadne.session_context(
+                    namespace=self._namespace_for("project"), max_sessions=2
+                ))
+            except Exception as e:
+                logger.debug("Session context injection failed: %s", e)
+        context_prefix = "\n".join(part for part in prefix_parts if part)
         # Cache by both query and session. A time-only cache returned the
         # previous turn's memories for a different query/session.
         if (
             self._prefetch_cache_key == key
             and (time.time() - self._prefetch_timestamp) < 2.0
         ):
-            return self._format_recall_block(self._prefetch_cache)
+            block = self._format_recall_block(self._prefetch_cache)
+            return "\n".join(part for part in (context_prefix, block) if part)
 
         try:
             results = self._scoped_recall(
@@ -233,7 +262,10 @@ class AriadneMemoryProvider(MemoryProvider):
             self._prefetch_cache_key = key
             self._prefetch_timestamp = time.time()
             if results:
-                return self._format_recall_block(results)
+                block = self._format_recall_block(results)
+                return "\n".join(part for part in (context_prefix, block) if part)
+            if context_prefix:
+                return context_prefix
         except Exception as e:
             logger.debug("Ariadne prefetch failed: %s", e)
 
@@ -268,6 +300,7 @@ class AriadneMemoryProvider(MemoryProvider):
         self._prefetch_cache = []
         self._prefetch_cache_key = None
         self._prefetch_timestamp = 0.0
+        self._session_context_injected = False
 
     def sync_turn(self, user_content: str, assistant_content: str, *,
                   session_id: str = "", messages: Optional[List[Dict]] = None) -> None:
@@ -277,6 +310,21 @@ class AriadneMemoryProvider(MemoryProvider):
 
         effective_session = session_id or self._session_id or "default"
         namespace = self._namespace_for("session", effective_session)
+
+        # Raw-turn provenance: episodes power search_sessions / digest_session /
+        # session continuity. They live in the durable project namespace (with
+        # the session id as a column) so cross-session recall finds them.
+        if user_content.strip() or assistant_content.strip():
+            try:
+                self._ariadne.record_episode(
+                    content=f"user: {user_content}\nassistant: {assistant_content}".strip(),
+                    role="turn",
+                    source="hermes",
+                    namespace=self._namespace_for("project", effective_session),
+                    session_id=effective_session,
+                )
+            except Exception:
+                pass
 
         # Store user message
         if user_content.strip():
@@ -386,6 +434,74 @@ class AriadneMemoryProvider(MemoryProvider):
                 "name": "ariadne_stats",
                 "description": "Return Ariadne memory statistics.",
                 "parameters": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "ariadne_search_sessions",
+                "description": "Search raw session history (recorded turns) by keyword. Use when distilled memories are not enough: 'what did I try last session?', error messages, file paths, decisions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query."},
+                        "limit": {"type": "integer", "description": "Max results. Default 5.", "default": 5},
+                        "session_id": {"type": "string", "description": "Restrict to one session (optional)."},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "ariadne_digest_session",
+                "description": "Distill a session's recorded turns into a compact digest memory so the next session starts with continuity. Call at session end.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "Session to digest (defaults to current)."},
+                        "force": {"type": "boolean", "description": "Re-digest even if one exists.", "default": False},
+                    },
+                },
+            },
+            {
+                "name": "ariadne_session_context",
+                "description": "Get a compact 'recent session context' block built from stored session digests. Also auto-injected on the first turn of each session.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "max_sessions": {"type": "integer", "description": "Max digests included. Default 2.", "default": 2},
+                    },
+                },
+            },
+            {
+                "name": "ariadne_core_view",
+                "description": "View the core memory blocks — always-in-context working state (persona, user profile, project state). Omit name to view all blocks.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Optional block name."},
+                    },
+                },
+            },
+            {
+                "name": "ariadne_core_append",
+                "description": "Append an observation to a core memory block (created if missing). Use for durable facts that should sit in every prompt.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Block name, e.g. 'user_profile'."},
+                        "text": {"type": "string", "description": "Text to append."},
+                    },
+                    "required": ["name", "text"],
+                },
+            },
+            {
+                "name": "ariadne_core_replace",
+                "description": "Replace the full content of a core memory block. Use when a fact changed and the old value must not linger.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "content": {"type": "string", "description": "New full content."},
+                    },
+                    "required": ["name", "content"],
+                },
             },
             {
                 "name": "ariadne_forget",
@@ -561,6 +677,12 @@ class AriadneMemoryProvider(MemoryProvider):
             "ariadne_recall": self._handle_recall,
             "ariadne_context_pack": self._handle_context_pack,
             "ariadne_stats": self._handle_stats,
+            "ariadne_search_sessions": self._handle_search_sessions,
+            "ariadne_digest_session": self._handle_digest_session,
+            "ariadne_session_context": self._handle_session_context,
+            "ariadne_core_view": self._handle_core_view,
+            "ariadne_core_append": self._handle_core_append,
+            "ariadne_core_replace": self._handle_core_replace,
             "ariadne_forget": self._handle_forget,
             "ariadne_update": self._handle_update,
             "ariadne_invalidate": self._handle_invalidate,
@@ -644,6 +766,107 @@ class AriadneMemoryProvider(MemoryProvider):
     def _handle_stats(self, args: Dict) -> str:
         stats = self._ariadne.stats()
         return json.dumps(stats)
+
+    def _handle_search_sessions(self, args: Dict) -> str:
+        if not self._ariadne:
+            return json.dumps({"error": "memory not initialized"})
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return json.dumps({"error": "query is required"})
+        try:
+            results = self._ariadne.search_episodes(
+                query,
+                k=int(args.get("limit") or 5),
+                namespace=self._namespace_for("project"),
+                session_id=str(args.get("session_id")) if args.get("session_id") else None,
+            )
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({
+            "count": len(results),
+            "results": [
+                {
+                    "session_id": r.get("session_id"),
+                    "role": r.get("role"),
+                    "content": (r.get("content") or "")[:400],
+                    "event_at": r.get("event_at"),
+                }
+                for r in results
+            ],
+        })
+
+    def _handle_digest_session(self, args: Dict) -> str:
+        if not self._ariadne:
+            return json.dumps({"error": "memory not initialized"})
+        session_id = str(args.get("session_id") or self._session_id or "").strip()
+        if not session_id:
+            return json.dumps({"error": "session_id is required"})
+        try:
+            result = self._ariadne.digest_session(
+                session_id,
+                namespace=self._namespace_for("project"),
+                force=bool(args.get("force", False)),
+            )
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({
+            "status": result.get("status"),
+            "memory_id": result.get("memory_id"),
+            "episodes": result.get("episodes"),
+        })
+
+    def _handle_core_view(self, args: Dict) -> str:
+        if not self._ariadne:
+            return json.dumps({"error": "memory not initialized"})
+        namespace = self._namespace_for("global")
+        name = str(args.get("name") or "").strip()
+        try:
+            if name:
+                return json.dumps({"block": self._ariadne.core_get(name, namespace=namespace)})
+            return json.dumps({"blocks": self._ariadne.core_blocks(namespace=namespace)})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    def _handle_core_append(self, args: Dict) -> str:
+        if not self._ariadne:
+            return json.dumps({"error": "memory not initialized"})
+        name = str(args.get("name") or "").strip()
+        text = str(args.get("text") or "").strip()
+        if not name or not text:
+            return json.dumps({"error": "name and text are required"})
+        try:
+            block = self._ariadne.core_append(
+                name, text, namespace=self._namespace_for("global")
+            )
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({"status": "appended", "name": block["name"], "length": len(block["content"])})
+
+    def _handle_core_replace(self, args: Dict) -> str:
+        if not self._ariadne:
+            return json.dumps({"error": "memory not initialized"})
+        name = str(args.get("name") or "").strip()
+        if not name or "content" not in args:
+            return json.dumps({"error": "name and content are required"})
+        try:
+            block = self._ariadne.core_set(
+                name, str(args.get("content") or ""), namespace=self._namespace_for("global")
+            )
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({"status": "replaced", "name": block["name"], "length": len(block["content"])})
+
+    def _handle_session_context(self, args: Dict) -> str:
+        if not self._ariadne:
+            return json.dumps({"error": "memory not initialized"})
+        try:
+            context = self._ariadne.session_context(
+                namespace=self._namespace_for("project"),
+                max_sessions=int(args.get("max_sessions") or 2),
+            )
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+        return json.dumps({"context": context})
 
     def _handle_forget(self, args: Dict) -> str:
         mid = args["memory_id"]

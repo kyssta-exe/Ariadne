@@ -31,10 +31,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install ruff mypy
-          pip install -e ".[dev]"
+          # integrations extras so mypy checks the adapters against the real
+          # optional packages instead of silencing import errors.
+          pip install -e ".[dev,integrations]"
 
       - name: Run Ruff (lint)
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ benchmarks/
 
       - name: Run Mypy (strict type check)
         run: mypy src/ --strict --exclude 'src/arriadne/dashboard/'

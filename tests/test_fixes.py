@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -44,7 +45,9 @@ class _FakeEmbedder:
     """
 
     dim = 4
-    _hw = {"vps", "server", "cores", "core", "ram", "specs", "spec", "cpu", "memory", "gb"}
+    _hw: ClassVar[set[str]] = {
+        "vps", "server", "cores", "core", "ram", "specs", "spec", "cpu", "memory", "gb"
+    }
 
     def __call__(self, text: str) -> list[float]:
         words = set(text.lower().replace(",", " ").split())
@@ -310,7 +313,7 @@ def test_concurrent_memory_interface_smoke(db_path):
 
     def worker(tid: int) -> None:
         try:
-            for i in range(20):
+            for _ in range(20):
                 mem.remember(f"thread {tid} note {uuid.uuid4().hex}", importance=0.5)
                 mem.recall(f"thread {tid}", k=3)
         except Exception as e:  # pragma: no cover - failure path

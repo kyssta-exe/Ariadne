@@ -18,7 +18,6 @@ from arriadne.dedup import ContradictionDetector, Deduplicator
 from arriadne.interface import AriadneMemory
 from arriadne.storage import AriadneDB, _fts_escape
 
-
 # ---------------------------------------------------------------------------
 # Helper: create a fresh temp db path, return config, and clean up on teardown
 # ---------------------------------------------------------------------------
@@ -300,7 +299,10 @@ class TestInvalidInputs:
 
     def test_special_unicode_content(self, empty_mem: AriadneMemory) -> None:
         """Unicode content with emoji and non-ASCII chars."""
-        content = "M\u00e9moire avec des caract\u00e8res sp\u00e9ciaux \U0001f9e0 \u2014 \u65e5\u672c\u8a9e \u0438 \u0440\u0443\u0441\u0441\u043a\u0438\u0439"
+        content = (
+            "Mémoire avec des caractères spéciaux 🧠 — 日本語"
+            " и русский"
+        )
         result = empty_mem.remember(content)
         assert result["status"] == "created"
         memory = empty_mem._db.get_memory(result["memory_id"])
@@ -1101,6 +1103,10 @@ class TestCombinedEdgeCases:
 
     def test_concurrent_add_and_read(self, empty_mem: AriadneMemory) -> None:
         """Interleave adds and reads rapidly."""
+        # This test targets interleaved write/read behaviour, not dedup: in
+        # only 8 dimensions random vectors legitimately exceed the semantic
+        # dedup threshold, so opt out of it here.
+        empty_mem._config.semantic_dedup = False
         emb = np.ones(8, dtype=np.float32)
         ids = []
 

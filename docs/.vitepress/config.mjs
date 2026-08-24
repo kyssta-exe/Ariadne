@@ -34,6 +34,7 @@ export default defineConfig({
           { text: 'Memory Types', link: '/guide/memory-types' },
           { text: 'Search & Retrieval', link: '/guide/search' },
           { text: 'Knowledge Graph', link: '/guide/graph' },
+          { text: 'Sessions & Trust', link: '/guide/sessions' },
           { text: 'Memory Lifecycle', link: '/guide/lifecycle' },
           { text: 'Deduplication', link: '/guide/deduplication' },
         ],
@@ -43,6 +44,7 @@ export default defineConfig({
         items: [
           { text: 'Architecture', link: '/guide/architecture' },
           { text: 'Embeddings', link: '/guide/embeddings' },
+          { text: 'Core Memory & Reranking', link: '/guide/core-memory' },
           { text: 'Migration', link: '/guide/migration' },
           { text: 'Addons', link: '/guide/addons' },
         ],

@@ -25,12 +25,13 @@ from typing import Any
 
 from .. import AriadneMemory
 
+function_tool: Any = None
 try:  # pragma: no cover - exercised only when openai-agents is installed
-    from agents import function_tool  # type: ignore
+    from agents import function_tool as _function_tool
 
+    function_tool = _function_tool
     _AGENTS_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    function_tool = None
     _AGENTS_AVAILABLE = False
 
 
@@ -157,7 +158,7 @@ class AriadneTools:
             )
 
         @function_tool
-        def ariadne_recall(arguments: str) -> str:  # type: ignore[no-redef]
+        def ariadne_recall(arguments: str) -> str:
             return self.recall(arguments)
 
         @function_tool

@@ -9,6 +9,7 @@ import logging
 import re
 from typing import Any
 
+import numpy as np
 from datasketch import MinHash, MinHashLSH
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,11 @@ class Deduplicator:
         self._minhashes: dict[str, MinHash] = {}
         self._contents: dict[str, str] = {}
         self._next_id = 0
+        # Template MinHash: datasketch regenerates the permutation tables on
+        # every MinHash construction (~0.3 ms each), which dominates both bulk
+        # ingest and the on-open index rebuild. Copying a template shares the
+        # permutations; hash values stay per-document.
+        self._template = MinHash(num_perm=num_perm)
         logger.debug("Initialized Deduplicator (threshold=%.2f, num_perm=%d)", threshold, num_perm)
 
     def _tokenize(self, text: str) -> list[str]:
@@ -81,8 +87,9 @@ class Deduplicator:
     def _similarity(self, query: str, doc_id: str, query_hash: MinHash) -> float:
         """Return a stable similarity score for LSH misses."""
         minhash_score = query_hash.jaccard(self._minhashes[doc_id])
-        query_negated = bool(re.search(r"\b(?:not|no|never|cannot|can't|won't|isn't|aren't)\b", query.lower()))
-        doc_negated = bool(re.search(r"\b(?:not|no|never|cannot|can't|won't|isn't|aren't)\b", self._contents[doc_id].lower()))
+        negation = r"\b(?:not|no|never|cannot|can't|won't|isn't|aren't)\b"
+        query_negated = bool(re.search(negation, query.lower()))
+        doc_negated = bool(re.search(negation, self._contents[doc_id].lower()))
         if query_negated != doc_negated:
             return 0.0
         query_tokens = set(self._tokenize(query))
@@ -92,8 +99,8 @@ class Deduplicator:
         return max(minhash_score, token_score)
 
     def _create_minhash(self, text: str) -> MinHash:
-        """Create a MinHash for the given text."""
-        m = MinHash(num_perm=self._num_perm)
+        """Create a MinHash for the given text (permutations shared via template copy)."""
+        m = self._template.copy()
         tokens = self._tokenize(text)
         # Use 2-word shingles for better accuracy
         for i in range(len(tokens) - 1):
@@ -156,6 +163,81 @@ class Deduplicator:
         except Exception as e:
             logger.warning("Error removing document %s: %s", doc_id, e)
             return False
+
+    # ── State persistence (startup fast path) ────────────────────────────
+
+    def dump_state(self) -> dict[str, Any]:
+        """Serialize the index state (hash values + LSH hashtables, no contents).
+
+        Contents are re-read from the database by the caller, so the dump is
+        compact. Reconstructing from hash values and a pickled LSH skips the
+        per-document MinHash computation *and* the per-document LSH insert
+        that dominate restart time on large stores.
+        """
+        import pickle
+
+        template = self._template
+        return {
+            "threshold": self._threshold,
+            "num_perm": self._num_perm,
+            "permutations": template.permutations.tobytes(),
+            "perm_dtype": str(template.permutations.dtype),
+            "hv_dtype": str(template.hashvalues.dtype),
+            "lsh": pickle.dumps(self._lsh, protocol=pickle.HIGHEST_PROTOCOL),
+            "docs": {
+                doc_id: m.hashvalues.tobytes() for doc_id, m in self._minhashes.items()
+            },
+        }
+
+    def restore_state(self, state: dict[str, Any], contents: dict[str, str]) -> None:
+        """Rebuild the index from :meth:`dump_state` output plus contents.
+
+        Args:
+            state: A ``dump_state()`` dict with matching threshold/num_perm.
+            contents: ``{doc_id: content}`` for every doc id in the state.
+
+        Raises:
+            ValueError: If the state's parameters do not match this index.
+        """
+        import pickle
+
+        if state.get("threshold") != self._threshold or state.get("num_perm") != self._num_perm:
+            raise ValueError("dedup state parameters do not match configuration")
+        perm = np.frombuffer(
+            state["permutations"], dtype=state.get("perm_dtype", "uint64")
+        )
+        template = self._template
+        # reshape to the template's (2, num_perm) form using its exact shape.
+        perm = perm.reshape(template.permutations.shape).copy()
+        hv_dtype = state.get("hv_dtype", "uint64")
+        scheme = template.scheme
+
+        restored_lsh: MinHashLSH | None = None
+        if "lsh" in state:
+            try:
+                candidate = pickle.loads(state["lsh"])
+                if isinstance(candidate, MinHashLSH):
+                    restored_lsh = candidate
+            except Exception as exc:  # pragma: no cover - corrupt blob
+                logger.warning("Persisted LSH unreadable (%s); re-inserting", exc)
+
+        if restored_lsh is not None:
+            self._lsh = restored_lsh
+        for doc_id, hv_bytes in state.get("docs", {}).items():
+            if doc_id not in contents:
+                continue  # row vanished from the db; skip
+            m = MinHash(
+                hashvalues=np.frombuffer(hv_bytes, dtype=hv_dtype).copy(),
+                permutations=perm,
+                scheme=scheme,
+            )
+            if restored_lsh is None:
+                try:
+                    self._lsh.insert(doc_id, m)
+                except ValueError:
+                    continue
+            self._minhashes[doc_id] = m
+            self._contents[doc_id] = contents[doc_id]
 
     def is_duplicate(self, content: str) -> bool:
         """Check if content is a near-duplicate of any indexed content.
@@ -252,11 +334,17 @@ class ContradictionDetector:
         self._negation_re = re.compile(
             "|".join(_NEGATION_PATTERNS), re.IGNORECASE
         )
-        # Split on conjunctions and sentence boundaries to get individual clauses
-        self._clause_splitter = re.compile(r"\s+(?:and|but|yet|however|,)\s+|\.|\;")
-        # Simple fact patterns for individual clauses
+        # Split on sentence/clause boundaries. Punctuation glued between two
+        # digits ("3.14", "1,000") is not a separator, but a comma after a
+        # number still is ("x is 8080, y is 9090"). The old pattern required
+        # whitespace *before* a comma, so "X is 5, Y is 6" was never split.
+        self._clause_splitter = re.compile(
+            r"(?:[.,;](?!\d)|(?<!\d)[.,;])|\s+(?:and|but|yet|however)\s+"
+        )
+        # Simple fact patterns for individual clauses. The subject may be up to
+        # four words, which covers real subjects like "the cache ttl".
         self._simple_fact_re = re.compile(
-            r"^(\w+(?:\s+\w+)?)\s+(?:is|are|was|were|has|have|had|can|could|may|might|does|did)\s+(.+)$",
+            r"^(\w+(?:\s+\w+){0,3}?)\s+(?:is|are|was|were|has|have|had|can|could|may|might|does|did)\s+(.+)$",
             re.IGNORECASE,
         )
 
@@ -265,7 +353,7 @@ class ContradictionDetector:
         clauses = self._clause_splitter.split(text)
         return [c.strip() for c in clauses if c.strip()]
 
-    def extract_facts(self, text: str) -> list[dict[str, str]]:
+    def extract_facts(self, text: str) -> list[dict[str, Any]]:
         """Extract factual claims from text.
 
         Splits text into clauses and extracts simple facts from each.
@@ -331,8 +419,40 @@ class ContradictionDetector:
                         "negated_in_a": fa["negated"],
                         "negated_in_b": fb["negated"],
                     })
+                    continue
+
+                # Value conflict: same subject, same predicate *shape*, but a
+                # different number ("ttl is 30 seconds" vs "ttl is 60
+                # seconds"). Only digits are wildcarded, so "blue" vs "green"
+                # never conflicts.
+                if (
+                    fa["subject"] == fb["subject"]
+                    and not fa["negated"]
+                    and not fb["negated"]
+                    and norm_pred_a != norm_pred_b
+                    and self._has_digit(norm_pred_a)
+                    and self._digit_shape(norm_pred_a) == self._digit_shape(norm_pred_b)
+                ):
+                    contradictions.append({
+                        "subject": fa["subject"],
+                        "predicate": fa["predicate"],
+                        "statement_a": fa["original"],
+                        "statement_b": fb["original"],
+                        "negated_in_a": False,
+                        "negated_in_b": False,
+                        "type": "value_conflict",
+                    })
 
         return contradictions
+
+    @staticmethod
+    def _has_digit(text: str) -> bool:
+        return bool(re.search(r"\d", text))
+
+    @staticmethod
+    def _digit_shape(text: str) -> str:
+        """Replace numbers with a placeholder so shapes can be compared."""
+        return re.sub(r"\d+(?:\.\d+)?", "<num>", text)
 
     def _normalize_predicate(self, predicate: str) -> str:
         """Normalize a predicate by removing negation words.

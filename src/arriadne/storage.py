@@ -150,6 +150,74 @@ class AriadneDB:
         assert self._conn is not None
         return self._conn
 
+    def _faiss_sidecar_path(self) -> Path | None:
+        """Path of the serialized FAISS index, or None for in-memory DBs."""
+        db_path = str(self._config.db_path)
+        if db_path in (":memory:", ""):
+            return None
+        return Path(db_path + ".faiss")
+
+    def _vector_fingerprint(self) -> str:
+        """Cheap state fingerprint of the vector set stored in SQLite.
+
+        ``"{count}:{max id}"`` over vector-bearing active rows. Any realistic
+        add/remove combination changes at least one of the two, so a sidecar
+        index whose embedded fingerprint disagrees with the database is stale
+        and gets rebuilt instead of trusted.
+        """
+        assert self._conn is not None
+        row = self._conn.execute(
+            """SELECT COUNT(*), COALESCE(MAX(id), 0) FROM memories
+               WHERE embedding IS NOT NULL AND is_deleted = 0"""
+        ).fetchone()
+        return f"{int(row[0])}:{int(row[1])}"
+
+    def _load_faiss_index(self) -> None:
+        """Load the FAISS index: sidecar file first, rebuild as fallback.
+
+        The ``memories`` table remains the source of truth — the sidecar is
+        only trusted when the fingerprint stored next to it (``<db>.faiss.fp``)
+        matches the database's current vector set, so external edits, crashes
+        between write and persist, or dimension changes all fall back to the
+        (correct, slower) rebuild.
+        """
+        sidecar = self._faiss_sidecar_path()
+        fingerprint = self._vector_fingerprint()
+        if sidecar is not None and sidecar.exists():
+            try:
+                fp_path = sidecar.parent / (sidecar.name + ".fp")
+                stored_fp = (
+                    fp_path.read_text(encoding="utf-8").strip() if fp_path.exists() else ""
+                )
+                candidate = faiss.read_index(str(sidecar))
+                if stored_fp == fingerprint and candidate.d == self._config.embedding_dim:
+                    self._faiss_index = candidate
+                    logger.info(
+                        "Loaded FAISS index from sidecar (%d vectors)", candidate.ntotal
+                    )
+                    return
+                logger.info("FAISS sidecar stale (fingerprint mismatch); rebuilding")
+            except Exception as e:
+                logger.warning("FAISS sidecar unreadable (%s); rebuilding", e)
+        self._faiss_index = self._build_faiss_from_db()
+
+    def _persist_faiss(self) -> None:
+        """Serialize the FAISS index (and its fingerprint) to the sidecar.
+
+        Called on close (and after full rebuilds) so the next open skips the
+        O(n) rebuild. Failures are logged and ignored — persistence is an
+        optimization, never a correctness requirement.
+        """
+        sidecar = self._faiss_sidecar_path()
+        if sidecar is None or self._faiss_index is None:
+            return
+        try:
+            faiss.write_index(self._faiss_index, str(sidecar))
+            fp_path = sidecar.parent / (sidecar.name + ".fp")
+            fp_path.write_text(self._vector_fingerprint(), encoding="utf-8")
+        except Exception as e:  # pragma: no cover - depends on filesystem state
+            logger.warning("Could not persist FAISS sidecar: %s", e)
+
     def open(self) -> None:
         """Open database connection and initialize schema + FAISS index."""
         if self._initialized:
@@ -159,6 +227,16 @@ class AriadneDB:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # NORMAL is the recommended WAL pairing: commits no longer fsync the
+        # WAL on every transaction (the checkpoint does), which removes an
+        # fsync from the hot write path. The database stays consistent under
+        # crashes; only the very last un-checkpointed transactions may be lost
+        # on a power failure.
+        self._conn.execute(f"PRAGMA synchronous={self._config.synchronous}")
+        # Page cache: the default ~2 MB thrashes once embeddings (~1.5 KB per
+        # row), 19 secondary indexes, and FTS5 compete — measured 4.3 -> 0.7
+        # ms/write on a 5k-memory ingest by raising it to 64 MB.
+        self._conn.execute(f"PRAGMA cache_size=-{int(self._config.cache_mb) * 1024}")
         self._conn.execute(f"PRAGMA wal_autocheckpoint={self._config.wal_autocheckpoint}")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -169,17 +247,20 @@ class AriadneDB:
     def close(self) -> None:
         """Close the database connection.
 
-        The FAISS index is not serialized separately: every embedding lives in
-        the ``memories`` table as a normalized BLOB and the index is rebuilt
-        from it on the next open. This keeps vectors and metadata in a single
-        source of truth that can never diverge.
+        Every embedding still lives in the ``memories`` table as a normalized
+        BLOB — the database alone is always sufficient to reconstruct
+        everything. As a startup optimization the FAISS index is additionally
+        serialized to a ``<db>.faiss`` sidecar (validated by fingerprint on
+        the next open) so reopening a large store does not pay the O(n)
+        rebuild.
         """
-        # Final WAL checkpoint before close (Optimization: flush pending WAL writes)
         if self._conn is not None:
+            # Final WAL checkpoint before close (Optimization: flush pending WAL writes)
             try:
                 self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except Exception:
                 pass
+        self._persist_faiss()
         if self._conn is not None:
             self._conn.close()
             self._conn = None
@@ -238,7 +319,9 @@ class AriadneDB:
         if existing_cols:
             migrations = {
                 "tags": "ALTER TABLE memories ADD COLUMN tags TEXT DEFAULT '[]'",
-                "namespace": "ALTER TABLE memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'",
+                "namespace": (
+                    "ALTER TABLE memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'"
+                ),
                 "scope": "ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'session'",
                 "user_id": "ALTER TABLE memories ADD COLUMN user_id TEXT",
                 "agent_id": "ALTER TABLE memories ADD COLUMN agent_id TEXT",
@@ -454,6 +537,37 @@ class AriadneDB:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodes_namespace ON episodes(namespace)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id)")
 
+        # Episode full-text index: lets agents search raw history the way
+        # ctx-style tools do ("what did I try last week?") without loading the
+        # whole episode table. External-content FTS5 kept in sync by triggers.
+        cursor.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts
+            USING fts5(
+                content,
+                content_rowid='id',
+                tokenize='porter unicode61'
+            )
+        """)
+        cursor.executescript("""
+            CREATE TRIGGER IF NOT EXISTS episodes_ai AFTER INSERT ON episodes BEGIN
+                INSERT INTO episodes_fts(rowid, content)
+                VALUES (new.id, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS episodes_ad AFTER DELETE ON episodes BEGIN
+                DELETE FROM episodes_fts WHERE rowid = old.id;
+            END;
+        """)
+        # Backfill legacy episodes into a freshly-created FTS table.
+        cursor.execute(
+            """INSERT INTO episodes_fts(rowid, content)
+               SELECT e.id, e.content
+               FROM episodes AS e
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM episodes_fts AS f WHERE f.rowid = e.id
+               )"""
+        )
+
         # Source table: provenance records attached to memories
         cursor.executescript("""
             CREATE TABLE IF NOT EXISTS sources (
@@ -488,6 +602,26 @@ class AriadneDB:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_feedback_memory ON feedback(memory_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_feedback_action ON feedback(action)")
 
+        # Core memory blocks (Letta-style working memory): small named blocks
+        # that are ALWAYS loaded into context — persona, human profile,
+        # project state. Kept separate from `memories` on purpose: they are
+        # mutable working state, not searchable facts, so dedup/eviction/
+        # retention must never touch them.
+        cursor.executescript("""
+            CREATE TABLE IF NOT EXISTS core_memory_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                namespace TEXT NOT NULL DEFAULT 'default',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE (name, namespace)
+            );
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_core_blocks_ns ON core_memory_blocks(namespace)"
+        )
+
         # A newly-created standalone FTS5 table has no rows for legacy
         # memories. Populate missing rowids so opening an old database does
         # not silently destroy keyword recall.
@@ -501,17 +635,6 @@ class AriadneDB:
         )
         self._commit()
         logger.debug("Schema created/verified")
-
-    def _load_faiss_index(self) -> None:
-        """Build the FAISS index from the embeddings stored in the database.
-
-        The ``memories`` table is the single source of truth for vectors. Because
-        we rebuild on open and key every vector on its memory id (IndexIDMap2),
-        the index can never drift out of sync with the database — the failure
-        mode of the old positional id-map, which silently returned the wrong
-        memory after a delete + reopen.
-        """
-        self._faiss_index = self._build_faiss_from_db()
 
     def _ivf_plan(self, n: int) -> int:
         """Return the IVF ``nlist`` to use for ``n`` vectors, or 0 to stay flat.
@@ -695,7 +818,7 @@ class AriadneDB:
                     retention_strength, is_deleted, metadata, tags, namespace,
                     scope, user_id, agent_id, session_id, project_id,
                     event_at, valid_from, valid_to, supersedes_id, confidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",  # noqa: E501 - 24-column placeholder list
                 (
                     content,
                     content_hash,
@@ -732,7 +855,7 @@ class AriadneDB:
                 for entity_name in entities:
                     entity_id = self._get_or_create_entity(entity_name)
                     self._conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",  # noqa: E501 - 24-column placeholder list
                         (memory_id, entity_id),
                     )
 
@@ -833,7 +956,7 @@ class AriadneDB:
                         retention_strength, is_deleted, metadata, tags, namespace,
                         scope, user_id, agent_id, session_id, project_id,
                         event_at, valid_from, valid_to, supersedes_id, confidence)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",  # noqa: E501 - 24-column placeholder list
                     (
                         content,
                         content_hash,
@@ -875,7 +998,7 @@ class AriadneDB:
                     for entity_name in entities:
                         entity_id = self._get_or_create_entity(entity_name)
                         self._conn.execute(
-                            "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                            "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",  # noqa: E501 - 24-column placeholder list
                             (memory_id, entity_id),
                         )
 
@@ -1101,7 +1224,7 @@ class AriadneDB:
                         retention_strength, metadata, tags, namespace, scope,
                         user_id, agent_id, session_id, project_id,
                         event_at, valid_from, valid_to, supersedes_id, confidence)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",  # noqa: E501 - 24-column placeholder list
                     (
                         content,
                         content_hash,
@@ -1138,7 +1261,7 @@ class AriadneDB:
                 for entity_name in mem.get("entities", []):
                     entity_id = self._get_or_create_entity(entity_name)
                     self._conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",
+                        "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?, ?)",  # noqa: E501 - 24-column placeholder list
                         (memory_id, entity_id),
                     )
                 count += 1
@@ -1177,7 +1300,8 @@ class AriadneDB:
                     skipped_links += 1
                     continue
                 self._conn.execute(
-                    """INSERT OR IGNORE INTO memory_links (source_id, target_id, link_type, strength, created_at)
+                    """INSERT OR IGNORE INTO memory_links
+                    (source_id, target_id, link_type, strength, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
                     (
                         source_id,
@@ -1291,35 +1415,99 @@ class AriadneDB:
             if row is None:
                 return None
 
-            return {
-                "id": row[0],
-                "content": row[1],
-                "content_hash": row[2],
-                "memory_type": row[3],
-                "importance": row[4],
-                "created_at": row[5],
-                "updated_at": row[6],
-                "accessed_at": row[7],
-                "access_count": row[8],
-                "retention_strength": row[9],
-                "is_deleted": bool(row[10]),
-                "metadata": json.loads(row[11]) if row[11] else None,
-                "tags": json.loads(row[12]) if row[12] else [],
-                "namespace": row[13],
-                "scope": row[14],
-                "user_id": row[15],
-                "agent_id": row[16],
-                "session_id": row[17],
-                "project_id": row[18],
-                "event_at": row[19],
-                "valid_from": row[20],
-                "valid_to": row[21],
-                "supersedes_id": row[22],
-                "confidence": row[23],
-            }
+            return self._row_to_memory(row)
         except sqlite3.Error as e:
             logger.error("Database error getting memory %d: %s", memory_id, e)
             return None
+
+    def _row_to_memory(self, row: Any) -> dict[str, Any]:
+        """Map a memories-table row (column order of ``get_memory``) to a dict."""
+        metadata_raw, tags_raw = row[11], row[12]
+        return {
+            "id": row[0],
+            "content": row[1],
+            "content_hash": row[2],
+            "memory_type": row[3],
+            "importance": row[4],
+            "created_at": row[5],
+            "updated_at": row[6],
+            "accessed_at": row[7],
+            "access_count": row[8],
+            "retention_strength": row[9],
+            "is_deleted": bool(row[10]),
+            # Fast path: NULL / stored defaults skip a json.loads per row, which
+            # dominates bulk row mapping at search time.
+            "metadata": json.loads(metadata_raw) if metadata_raw else None,
+            "tags": json.loads(tags_raw) if tags_raw and tags_raw != "[]" else [],
+            "namespace": row[13],
+            "scope": row[14],
+            "user_id": row[15],
+            "agent_id": row[16],
+            "session_id": row[17],
+            "project_id": row[18],
+            "event_at": row[19],
+            "valid_from": row[20],
+            "valid_to": row[21],
+            "supersedes_id": row[22],
+            "confidence": row[23],
+        }
+
+    @_synchronized
+    def get_memories_bulk(self, memory_ids: list[int]) -> dict[int, dict[str, Any]]:
+        """Fetch several memories by id in one query.
+
+        Returns a dict keyed by memory id; missing and soft-deleted ids are
+        absent from the result. Search pipelines use this instead of one
+        ``get_memory`` call per candidate (the old N+1 pattern).
+        """
+        assert self._conn is not None
+        unique_ids = list(dict.fromkeys(int(i) for i in memory_ids if i >= 0))
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" * len(unique_ids))
+        rows = self._conn.execute(
+            f"""SELECT id, content, content_hash, memory_type, importance,
+                       created_at, updated_at, accessed_at, access_count,
+                       retention_strength, is_deleted, metadata, tags, namespace,
+                       scope, user_id, agent_id, session_id, project_id,
+                       event_at, valid_from, valid_to, supersedes_id, confidence
+                FROM memories WHERE id IN ({placeholders})""",
+            unique_ids,
+        ).fetchall()
+        return {int(row[0]): self._row_to_memory(row) for row in rows}
+
+    @_synchronized
+    def recent_memories(
+        self,
+        limit: int = 20,
+        namespace: str | None = None,
+        include_deleted: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List the most recently created memories (newest first).
+
+        Backs listing surfaces (CLI ``list``, adapter fallbacks) that need
+        recent items rather than query-ranked ones.
+        """
+        assert self._conn is not None
+        sql = """SELECT id, content, content_hash, memory_type, importance,
+                        created_at, updated_at, accessed_at, access_count,
+                        retention_strength, is_deleted, metadata, tags, namespace,
+                        scope, user_id, agent_id, session_id, project_id,
+                        event_at, valid_from, valid_to, supersedes_id, confidence
+                 FROM memories"""
+        params: list[Any] = []
+        conditions = []
+        if not include_deleted:
+            conditions.append("is_deleted = 0")
+        if namespace is not None:
+            conditions.append("namespace = ?")
+            params.append(namespace)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_memory(row) for row in rows]
 
     @_synchronized
     def touch_memory(self, memory_id: int) -> None:
@@ -1516,6 +1704,18 @@ class AriadneDB:
             self._conn.rollback()
             return False
 
+    def _namespaces_for_ids(self, memory_ids: list[int]) -> dict[int, str]:
+        """Light id -> namespace projection used to pre-filter vector candidates."""
+        assert self._conn is not None
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" * len(memory_ids))
+        rows = self._conn.execute(
+            f"SELECT id, namespace FROM memories WHERE id IN ({placeholders})",
+            memory_ids,
+        ).fetchall()
+        return {int(r[0]): str(r[1]) for r in rows}
+
     @_synchronized
     def vector_search(
         self, embedding: np.ndarray, k: int = 10, namespace: str | None = None
@@ -1525,6 +1725,11 @@ class AriadneDB:
         Args:
             embedding: Query embedding vector.
             k: Number of results to return.
+            namespace: Optional namespace filter. The FAISS index is not
+                namespace-partitioned, so a filtered search widens its candidate
+                window geometrically (instead of scanning the whole index) until
+                k in-namespace hits are found; only the returned rows are
+                hydrated in full.
 
         Returns:
             List of memory dicts ordered by similarity (descending).
@@ -1536,26 +1741,41 @@ class AriadneDB:
         try:
             emb = self._normalize_embedding(np.asarray(embedding, dtype=np.float32))
             vec = emb.reshape(1, -1)
-            requested_k = min(
-                self._faiss_index.ntotal, self._faiss_index.ntotal if namespace else k
-            )
-            distances, indices = self._faiss_index.search(vec, requested_k)
+            selected: list[tuple[float, int]] = []
+            probe_k = k if namespace is None else max(k * 4, 64)
+            while True:
+                requested_k = min(probe_k, self._faiss_index.ntotal)
+                distances, indices = self._faiss_index.search(vec, requested_k)
 
-            results = []
-            for dist, idx in zip(distances[0], indices[0]):
-                if idx < 0:
-                    continue
                 # With IndexIDMap2 the returned label is the memory's own id.
-                memory = self.get_memory(int(idx))
-                if memory is not None and not memory["is_deleted"]:
-                    if namespace is not None and memory.get("namespace") != namespace:
-                        continue
-                    memory["score"] = float(dist)
-                    memory["search_type"] = "vector"
-                    results.append(memory)
-                    if len(results) >= k:
-                        break
-            return results
+                candidates = [
+                    (float(dist), int(idx))
+                    for dist, idx in zip(distances[0], indices[0], strict=True)
+                    if idx >= 0
+                ]
+                if namespace is None:
+                    selected = candidates[:k]
+                    break
+                ns_map = self._namespaces_for_ids([idx for _, idx in candidates])
+                selected = [
+                    (dist, idx)
+                    for dist, idx in candidates
+                    if ns_map.get(idx) == namespace
+                ][:k]
+                if len(selected) >= k or requested_k >= self._faiss_index.ntotal:
+                    break
+                probe_k *= 2
+
+            by_id = self.get_memories_bulk([idx for _, idx in selected])
+            results: list[dict[str, Any]] = []
+            for dist, idx in selected:
+                memory = by_id.get(idx)
+                if memory is None or memory["is_deleted"]:
+                    continue
+                memory["score"] = dist
+                memory["search_type"] = "vector"
+                results.append(memory)
+            return results[:k]
 
         except Exception as e:
             logger.error("Vector search error: %s", e)
@@ -1608,7 +1828,7 @@ class AriadneDB:
             all_results: list[list[dict[str, Any]]] = []
             for query_idx in range(len(queries)):
                 results = []
-                for dist, idx in zip(distances[query_idx], indices[query_idx]):
+                for dist, idx in zip(distances[query_idx], indices[query_idx], strict=True):
                     if idx < 0:
                         continue
                     # With IndexIDMap2 the returned label is the memory's own id.
@@ -1680,8 +1900,9 @@ class AriadneDB:
                     break
 
             results = []
+            row_map = self.get_memories_bulk([int(rowid) for rowid, _, _ in rows])
             for rowid, rank, score in rows:
-                memory = self.get_memory(int(rowid))
+                memory = row_map.get(int(rowid))
                 if memory is not None and not memory["is_deleted"]:
                     memory["score"] = float(score)
                     memory["search_type"] = "fts"
@@ -1777,16 +1998,21 @@ class AriadneDB:
         # Memories with higher confidence float; rejected/stale ones sink.
         # Multiplier maps confidence [0,1] -> [0.5, 1.0], so default (1.0) is
         # unchanged and a rejected memory (0.1) drops to ~0.55x its fused score.
-        all_ids = set(fts_ranks.keys()) | set(vector_ranks.keys())
+        # Both input lists already carry full memory dicts (fetched inside
+        # fts_search / vector_search), so no third row fetch is needed.
+        row_map: dict[int, dict[str, Any]] = {}
+        for mem in fts_results:
+            row_map.setdefault(mem["id"], mem)
+        for mem in vector_results:
+            row_map.setdefault(mem["id"], mem)
         fused_scores: dict[int, float] = {}
-        for mid in all_ids:
+        for mid in row_map:
             score = 0.0
             if mid in fts_ranks:
                 score += 1.0 / (rrf_k + fts_ranks[mid])
             if mid in vector_ranks:
                 score += 1.0 / (rrf_k + vector_ranks[mid])
-            mem = self.get_memory(mid)
-            conf = _memory_confidence(mem)
+            conf = _memory_confidence(row_map.get(mid))
             fused_scores[mid] = score * (0.5 + 0.5 * conf)
 
         # Sort by fused score
@@ -1794,7 +2020,7 @@ class AriadneDB:
 
         results = []
         for mid in sorted_ids:
-            memory = self.get_memory(mid)
+            memory = row_map.get(mid)
             if memory is not None and not memory["is_deleted"]:
                 memory["score"] = fused_scores[mid]
                 memory["search_type"] = "hybrid"
@@ -2419,6 +2645,216 @@ class AriadneDB:
             raise
 
     @_synchronized
+    def expand_by_entities(
+        self,
+        seed_ids: list[int],
+        limit: int = 10,
+        namespace: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find active memories that share entities with the seed memories.
+
+        This is the associative step of recall: given direct hits, surface the
+        knowledge-graph neighbourhood without a full graph traversal. Candidates
+        are ranked by the number of entities shared with the seeds. Returned
+        dicts carry ``shared_entities`` and ``search_type='graph_expansion'``
+        (no ``score`` — the caller scales relative to the seeds).
+        """
+        assert self._conn is not None
+        seeds = [int(i) for i in dict.fromkeys(seed_ids)]
+        if not seeds:
+            return []
+        seed_placeholders = ",".join("?" * len(seeds))
+        sql = f"""SELECT me2.memory_id, COUNT(DISTINCT me2.entity_id) AS shared
+                  FROM memory_entities AS me1
+                  JOIN memory_entities AS me2
+                    ON me1.entity_id = me2.entity_id
+                   AND me2.memory_id != me1.memory_id
+                  JOIN memories AS m ON m.id = me2.memory_id
+                  WHERE me1.memory_id IN ({seed_placeholders})
+                    AND m.is_deleted = 0"""
+        params: list[Any] = list(seeds)
+        if namespace is not None:
+            sql += " AND m.namespace = ?"
+            params.append(namespace)
+        sql += " GROUP BY me2.memory_id ORDER BY shared DESC, me2.memory_id ASC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        candidates = {int(r[0]): int(r[1]) for r in rows}
+        if not candidates:
+            return []
+        row_map = self.get_memories_bulk(list(candidates.keys()))
+        results: list[dict[str, Any]] = []
+        for mid, shared in candidates.items():
+            memory = row_map.get(mid)
+            if memory is None or mid in seeds:
+                continue
+            memory["shared_entities"] = shared
+            memory["search_type"] = "graph_expansion"
+            results.append(memory)
+        results.sort(key=lambda mem: (-mem["shared_entities"], mem["id"]))
+        return results
+
+    @_synchronized
+    def search_episodes(
+        self,
+        query: str,
+        k: int = 10,
+        namespace: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search raw episode history by keyword (BM25 over ``episodes_fts``).
+
+        This is the "search your past sessions" surface: it finds the actual
+        turns, not the distilled memories, so agents can recover detail that
+        extraction dropped. Precision first (AND), then OR fallback, mirroring
+        ``fts_search``.
+        """
+        assert self._conn is not None
+        try:
+            for op in ("AND", "OR"):
+                fts_query = _fts_escape(query, op=op)
+                sql = """SELECT e.id, e.content, e.role, e.source, e.event_at,
+                                e.metadata, e.namespace, e.session_id,
+                                e.created_at, ABS(f.rank) AS score
+                         FROM episodes_fts AS f
+                         JOIN episodes AS e ON e.id = f.rowid
+                         WHERE f.episodes_fts MATCH ?"""
+                params: list[Any] = [fts_query]
+                if namespace is not None:
+                    sql += " AND e.namespace = ?"
+                    params.append(namespace)
+                if session_id is not None:
+                    sql += " AND e.session_id = ?"
+                    params.append(session_id)
+                sql += " ORDER BY score DESC, e.id ASC LIMIT ?"
+                params.append(k)
+                rows = self._conn.execute(sql, params).fetchall()
+                if rows:
+                    break
+            return [
+                {
+                    "id": r[0],
+                    "content": r[1],
+                    "role": r[2],
+                    "source": r[3],
+                    "event_at": r[4],
+                    "metadata": json.loads(r[5]) if r[5] else None,
+                    "namespace": r[6],
+                    "session_id": r[7],
+                    "created_at": r[8],
+                    "score": float(r[9]),
+                }
+                for r in rows
+            ]
+        except sqlite3.Error as e:
+            logger.error("Episode search error: %s", e)
+            return []
+
+    @_synchronized
+    def get_episodes(
+        self,
+        session_id: str | None = None,
+        namespace: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """List episodes (oldest first), optionally scoped to a session."""
+        assert self._conn is not None
+        sql = """SELECT id, content, role, source, event_at, metadata,
+                        namespace, session_id, created_at
+                 FROM episodes"""
+        params: list[Any] = []
+        conditions = []
+        if session_id is not None:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+        if namespace is not None:
+            conditions.append("namespace = ?")
+            params.append(namespace)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY event_at ASC, id ASC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r[0],
+                "content": r[1],
+                "role": r[2],
+                "source": r[3],
+                "event_at": r[4],
+                "metadata": json.loads(r[5]) if r[5] else None,
+                "namespace": r[6],
+                "session_id": r[7],
+                "created_at": r[8],
+            }
+            for r in rows
+        ]
+
+    @_synchronized
+    def list_sessions(
+        self, namespace: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Summarize recorded sessions: turn counts and time ranges, newest first."""
+        assert self._conn is not None
+        sql = """SELECT session_id, COUNT(*) AS turns,
+                        MIN(event_at) AS first_at, MAX(event_at) AS last_at
+                 FROM episodes
+                 WHERE session_id IS NOT NULL"""
+        params: list[Any] = []
+        if namespace is not None:
+            sql += " AND namespace = ?"
+            params.append(namespace)
+        sql += " GROUP BY session_id ORDER BY last_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "session_id": r[0],
+                "turns": int(r[1]),
+                "first_event_at": r[2],
+                "last_event_at": r[3],
+            }
+            for r in rows
+        ]
+
+    @_synchronized
+    def list_session_digests(
+        self, namespace: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Return the most recent session-digest memories (newest first).
+
+        Digests are ordinary memories whose metadata carries
+        ``{"kind": "session_digest", "session_id": ...}``; JSON1 extracts the
+        kind so the filter never depends on serialized-string formatting.
+        """
+        assert self._conn is not None
+        sql = """SELECT id, content, created_at, event_at, namespace,
+                        metadata, importance, memory_type
+                 FROM memories
+                 WHERE is_deleted = 0
+                   AND json_extract(metadata, '$.kind') = 'session_digest'"""
+        params: list[Any] = []
+        if namespace is not None:
+            sql += " AND namespace = ?"
+            params.append(namespace)
+        sql += " ORDER BY COALESCE(event_at, created_at) DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r[0],
+                "content": r[1],
+                "created_at": r[2],
+                "event_at": r[3],
+                "namespace": r[4],
+                "metadata": json.loads(r[5]) if r[5] else None,
+                "importance": r[6],
+                "memory_type": r[7],
+            }
+            for r in rows
+        ]
+
+    @_synchronized
     def add_source(
         self,
         memory_id: int,
@@ -2482,6 +2918,35 @@ class AriadneDB:
             raise
 
     @_synchronized
+    def adjust_confidence(self, memory_id: int, delta: float) -> float | None:
+        """Shift a memory's confidence by ``delta`` (clamped to [0, 1]).
+
+        This is the trust-scoring primitive: recall reinforcement, contradiction
+        penalties, and explicit agent feedback all flow through here, so trust
+        evolves as memories are confirmed or contested instead of being a static
+        write-time guess. Returns the new confidence, or None if not found.
+        """
+        assert self._conn is not None
+        try:
+            cursor = self._conn.execute(
+                """UPDATE memories
+                   SET confidence = MIN(1.0, MAX(0.0, COALESCE(confidence, 1.0) + ?))
+                   WHERE id = ? AND is_deleted = 0""",
+                (float(delta), memory_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            self._commit()
+            row = self._conn.execute(
+                "SELECT confidence FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            return float(row[0]) if row is not None else None
+        except sqlite3.Error as e:
+            logger.error("Error adjusting confidence for %d: %s", memory_id, e)
+            self._conn.rollback()
+            return None
+
+    @_synchronized
     def get_feedback(self, memory_id: int) -> list[dict[str, Any]]:
         """Get all feedback for a memory."""
         assert self._conn is not None
@@ -2501,6 +2966,34 @@ class AriadneDB:
             }
             for r in rows
         ]
+
+    @_synchronized
+    def get_feedback_bulk(self, memory_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Fetch feedback for several memories in one query (keyed by memory id)."""
+        assert self._conn is not None
+        unique_ids = list(dict.fromkeys(int(i) for i in memory_ids))
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" * len(unique_ids))
+        rows = self._conn.execute(
+            f"""SELECT memory_id, id, action, confidence_delta, note, actor, created_at
+                FROM feedback WHERE memory_id IN ({placeholders})
+                ORDER BY created_at DESC""",
+            unique_ids,
+        ).fetchall()
+        result: dict[int, list[dict[str, Any]]] = {mid: [] for mid in unique_ids}
+        for r in rows:
+            result[int(r[0])].append(
+                {
+                    "id": r[1],
+                    "action": r[2],
+                    "confidence_delta": r[3],
+                    "note": r[4],
+                    "actor": r[5],
+                    "created_at": r[6],
+                }
+            )
+        return result
 
     @_synchronized
     def recall_with_temporal(
@@ -2582,6 +3075,182 @@ class AriadneDB:
             }
             for r in rows
         ]
+
+    @_synchronized
+    def get_sources_bulk(self, memory_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Fetch provenance sources for several memories in one query."""
+        assert self._conn is not None
+        unique_ids = list(dict.fromkeys(int(i) for i in memory_ids))
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" * len(unique_ids))
+        rows = self._conn.execute(
+            f"""SELECT s.memory_id, s.id, s.episode_id, s.source, s.source_id,
+                       s.span, s.confidence, s.created_at, e.content
+                FROM sources AS s
+                LEFT JOIN episodes AS e ON e.id = s.episode_id
+                WHERE s.memory_id IN ({placeholders})
+                ORDER BY s.created_at""",
+            unique_ids,
+        ).fetchall()
+        result: dict[int, list[dict[str, Any]]] = {mid: [] for mid in unique_ids}
+        for r in rows:
+            result[int(r[0])].append(
+                {
+                    "id": r[1],
+                    "episode_id": r[2],
+                    "source": r[3],
+                    "source_id": r[4],
+                    "span": r[5],
+                    "confidence": r[6],
+                    "created_at": r[7],
+                    "episode_content": r[8],
+                }
+            )
+        return result
+
+    # ── Core memory blocks (Letta-style always-in-context state) ──────────
+
+    @staticmethod
+    def _core_block_row(row: Any) -> dict[str, Any]:
+        return {
+            "id": int(row[0]),
+            "name": str(row[1]),
+            "content": str(row[2]),
+            "namespace": str(row[3]),
+            "created_at": float(row[4]),
+            "updated_at": float(row[5]),
+        }
+
+    @_synchronized
+    def core_block_set(
+        self, name: str, content: str, namespace: str = "default"
+    ) -> dict[str, Any]:
+        """Upsert one core memory block and return it."""
+        assert self._conn is not None
+        now = _now()
+        self._conn.execute(
+            """INSERT INTO core_memory_blocks (name, content, namespace, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (name, namespace)
+               DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at""",
+            (name, content, namespace, now, now),
+        )
+        self._commit()
+        block = self.core_block_get(name, namespace)
+        assert block is not None
+        return block
+
+    @_synchronized
+    def core_block_get(
+        self, name: str, namespace: str = "default"
+    ) -> dict[str, Any] | None:
+        """Return one core memory block, or None."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            """SELECT id, name, content, namespace, created_at, updated_at
+               FROM core_memory_blocks WHERE name = ? AND namespace = ?""",
+            (name, namespace),
+        ).fetchone()
+        return self._core_block_row(row) if row is not None else None
+
+    @_synchronized
+    def core_block_append(
+        self,
+        name: str,
+        text: str,
+        namespace: str = "default",
+        char_limit: int = 10000,
+    ) -> dict[str, Any]:
+        """Append text to a core block (created if missing), bounded by ``char_limit``.
+
+        Letta-style agents append observations continuously; the bound keeps a
+        runaway loop from growing the block past what fits in a prompt. When
+        the append would exceed the limit, the *oldest* content is dropped
+        from the front so the most recent observations survive.
+        """
+        assert self._conn is not None
+        existing = self.core_block_get(name, namespace)
+        content = (existing["content"] if existing else "") + text
+        if len(content) > char_limit:
+            content = content[len(content) - char_limit :]
+        return self.core_block_set(name, content, namespace)
+
+    @_synchronized
+    def core_block_delete(self, name: str, namespace: str = "default") -> bool:
+        """Delete one core memory block. Returns True if it existed."""
+        assert self._conn is not None
+        cursor = self._conn.execute(
+            "DELETE FROM core_memory_blocks WHERE name = ? AND namespace = ?",
+            (name, namespace),
+        )
+        deleted = cursor.rowcount > 0
+        self._commit()
+        return deleted
+
+    @_synchronized
+    def core_blocks_list(self, namespace: str = "default") -> list[dict[str, Any]]:
+        """List a namespace's core memory blocks, ordered by name."""
+        assert self._conn is not None
+        rows = self._conn.execute(
+            """SELECT id, name, content, namespace, created_at, updated_at
+               FROM core_memory_blocks WHERE namespace = ? ORDER BY name""",
+            (namespace,),
+        ).fetchall()
+        return [self._core_block_row(row) for row in rows]
+
+    # ── Entity resolution ─────────────────────────────────────────────────
+
+    @_synchronized
+    def merge_entities(self, source: str, target: str) -> int:
+        """Merge entity ``source`` into ``target`` (alias resolution).
+
+        Re-points every ``memory_entities`` link and both directions of every
+        graph edge onto the target entity (existing links win on conflict),
+        then removes the source entity. Returns how many links were moved.
+        """
+        assert self._conn is not None
+        source_id = self._get_or_create_entity(source)
+        target_id = self._get_or_create_entity(target)
+        if source_id == target_id:
+            return 0
+        moved = 0
+        try:
+            cur = self._conn.execute(
+                """INSERT OR IGNORE INTO memory_entities (memory_id, entity_id)
+                   SELECT memory_id, ? FROM memory_entities WHERE entity_id = ?""",
+                (target_id, source_id),
+            )
+            moved += cur.rowcount
+            self._conn.execute("DELETE FROM memory_entities WHERE entity_id = ?", (source_id,))
+
+            # Both edge directions, honouring the (source, target, type)
+            # unique index: insert-or-ignore first, then delete the originals.
+            cur = self._conn.execute(
+                """INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created_at)
+                   SELECT ?, target_id, edge_type, weight, created_at
+                   FROM edges WHERE source_id = ?""",
+                (target_id, source_id),
+            )
+            moved += cur.rowcount
+            self._conn.execute("DELETE FROM edges WHERE source_id = ?", (source_id,))
+
+            cur = self._conn.execute(
+                """INSERT OR IGNORE INTO edges (source_id, target_id, edge_type, weight, created_at)
+                   SELECT source_id, ?, edge_type, weight, created_at
+                   FROM edges WHERE target_id = ?""",
+                (target_id, source_id),
+            )
+            moved += cur.rowcount
+            self._conn.execute("DELETE FROM edges WHERE target_id = ?", (source_id,))
+
+            self._conn.execute("DELETE FROM entities WHERE id = ?", (source_id,))
+            self._commit()
+        except sqlite3.Error as e:
+            logger.error("Error merging entities %r -> %r: %s", source, target, e)
+            self._conn.rollback()
+            raise
+        return moved
 
 
 @lru_cache(maxsize=4096)
