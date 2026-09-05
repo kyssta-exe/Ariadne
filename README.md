@@ -108,7 +108,12 @@ mem.graph("WebApp", hops=2)   # → API, Database
 Ebbinghaus forgetting curve `R = e^(-t/S)`. Stability `S` grows each time a
 memory is recalled (`retention_growth_factor`, capped) — memories strengthen
 with use and fade without it. Priority-weighted scoring from importance,
-recency, access count, and retention drives eviction.
+recency, access count, and retention drives capacity-based eviction.
+
+**Your memories are never destroyed implicitly.** Eviction only runs when the
+store exceeds an explicit `max_memories` capacity (default: off) — without one,
+`evict()` is a no-op and bounding the store is your call (`curator.decay()`,
+`maintenance()`).
 
 ### Auto-deduplication
 
@@ -116,11 +121,79 @@ MinHash LSH catches near-duplicates before they enter the store; the index is
 rebuilt from the database on open so it survives restarts. Exact duplicates are
 caught by a SHA-256 content hash.
 
+### Smarter recall
+
+Two optional knobs on `recall()` / `context_pack()` improve result quality:
+
+```python
+# MMR diversifies the top-k so you get distinct facets, not k near-duplicates.
+mem.recall("deploy", k=5, mmr=0.3)
+
+# Recency weighting floats fresh facts (recorded in score_parts — still explainable).
+mem.context_pack("what did we decide?", token_budget=800, recency_boost=0.5)
+```
+
+Superseded facts (e.g. an API key that was rotated) are hidden by checking the
+whole store for an active replacement — not just the current result window —
+and every ranking adjustment is visible in `score_parts`.
+
+### Config without code
+
+```bash
+export ARIADNE_DB_PATH=~/.ariadne/memory.db
+export ARIADNE_MAX_MEMORIES=100000        # optional capacity bound
+# or a TOML file: AriadneConfig.from_toml("ariadne.toml")
+```
+
+### Health checks
+
+```bash
+ariadne doctor   # index sync, FTS coverage, orphans, dangling pointers — exit 1 on failure
+ariadne feedback 42 --action reject   # confidence-weighted feedback loop
+```
+
 ### Built for agents
 
 Thread-safe (a single `AriadneMemory` can be shared across threads), reads are
 side-effect-free, and housekeeping (`evict` / `consolidate` / `prune_access_log`
-/ `purge_deleted`, or `maintenance()` for all four) keeps the store bounded.
+/ `purge_deleted`, or `maintenance()` for all four) keeps the store tidy.
+
+### Drop into Claude Code (and other MCP hosts)
+
+One command prints ready-to-merge registration JSON for Claude Code, Claude
+Desktop, Cursor, VS Code, and Zed:
+
+```bash
+ariadne mcp --host claude-code
+```
+
+For Claude Code you can also wire **memory hooks** — every user prompt injects
+a packed block of relevant memories as context, and every finished turn is
+recorded (optionally distilled into facts/relations by an LLM):
+
+```jsonc
+// ~/.claude/settings.json — snippet printed by `ariadne mcp --host claude-code`
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "ariadne hook claude-code --db-path /abs/path.db" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "ariadne hook claude-code --db-path /abs/path.db" }] }
+    ]
+  }
+}
+```
+
+Hooks are fail-open: if the memory store is unavailable, your session is not.
+
+### Dashboard auth + metrics
+
+```bash
+ariadne dashboard --token "$(openssl rand -hex 32)"   # or ARIADNE_DASHBOARD_TOKEN
+curl -H "Authorization: Bearer $TOKEN" localhost:8765/api/stats
+curl localhost:8765/metrics        # Prometheus text format, zero dependencies
+```
 
 ---
 
