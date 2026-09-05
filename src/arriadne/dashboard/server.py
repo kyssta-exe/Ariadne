@@ -7,11 +7,14 @@ Usage:
 
 from __future__ import annotations
 
+import hmac as _hmac
 import json
 import os
 import shutil
 import sys
+import threading as _threading
 import time
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +27,9 @@ from arriadne.interface import AriadneMemory
 # ---------------------------------------------------------------------------
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, Request
+    from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-    from fastapi import UploadFile
     from fastapi.staticfiles import StaticFiles
 except ImportError as exc:  # pragma: no cover
     raise SystemExit(
@@ -98,12 +100,131 @@ def _parse_range(range_str: str) -> float:
 # App factory
 # ---------------------------------------------------------------------------
 
+class _MetricsState:
+    """Thread-safe in-memory counters for the Prometheus endpoint."""
 
-def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
+    def __init__(self) -> None:
+        self._lock = _threading.Lock()
+        self.started_at = _time.time()
+        self.requests_total = 0
+        self.requests_by_outcome: dict[tuple[str, int, str], int] = {}
+        self.duration_seconds_total = 0.0
+
+    def record(self, method: str, status: int, route_class: str, duration: float) -> None:
+        with self._lock:
+            self.requests_total += 1
+            key = (method, int(status), route_class)
+            self.requests_by_outcome[key] = self.requests_by_outcome.get(key, 0) + 1
+            self.duration_seconds_total += duration
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "started_at": self.started_at,
+                "requests_total": self.requests_total,
+                "requests_by_outcome": dict(self.requests_by_outcome),
+                "duration_seconds_total": self.duration_seconds_total,
+            }
+
+
+def _prom_escape(label: str) -> str:
+    return str(label).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _render_prometheus(mem_stats: dict[str, Any], metrics: dict[str, Any]) -> str:
+    """Render metrics in the Prometheus text exposition format (no deps)."""
+    lines: list[str] = []
+
+    def gauge(name: str, help_text: str, value: Any) -> None:
+        lines.append(f"# HELP {name} {_prom_escape(help_text)}")
+        lines.append(f"# TYPE {name} gauge")
+        lines.append(f"{name} {value}")
+
+    gauge(
+        "ariadne_memories_active",
+        "Active (non-deleted) memories.",
+        mem_stats.get("active_memories", 0),
+    )
+    gauge(
+        "ariadne_memories_total",
+        "All memory rows including soft-deleted.",
+        mem_stats.get("total_memories", 0),
+    )
+    gauge(
+        "ariadne_memories_deleted",
+        "Soft-deleted memories kept for recovery.",
+        mem_stats.get("deleted_memories", 0),
+    )
+    gauge("ariadne_entities_total", "Knowledge-graph entities.", mem_stats.get("total_entities", 0))
+    gauge("ariadne_edges_total", "Knowledge-graph edges.", mem_stats.get("total_edges", 0))
+    gauge(
+        "ariadne_memory_links_total",
+        "Direct memory-to-memory links.",
+        mem_stats.get("total_memory_links", 0),
+    )
+    gauge(
+        "ariadne_consolidations_total",
+        "Consolidation groups created.",
+        mem_stats.get("total_consolidations", 0),
+    )
+    gauge(
+        "ariadne_faiss_vectors",
+        "Vectors currently in the FAISS index.",
+        mem_stats.get("faiss_vectors", 0),
+    )
+    gauge(
+        "ariadne_db_size_bytes",
+        "SQLite database file size in bytes.",
+        mem_stats.get("db_size_bytes", 0),
+    )
+    gauge(
+        "ariadne_avg_importance",
+        "Mean importance across active memories.",
+        mem_stats.get("avg_importance", 0.0),
+    )
+    gauge(
+        "ariadne_dashboard_uptime_seconds",
+        "Seconds since the dashboard process started.",
+        round(_time.time() - metrics["started_at"], 3),
+    )
+
+    lines.append("# HELP ariadne_dashboard_http_requests_total HTTP requests handled.")
+    lines.append("# TYPE ariadne_dashboard_http_requests_total counter")
+    if metrics["requests_by_outcome"]:
+        for (method, status, route_class), count in sorted(
+            metrics["requests_by_outcome"].items()
+        ):
+            lines.append(
+                f'ariadne_dashboard_http_requests_total{{method="{_prom_escape(method)}",'
+                f'status="{status}",route="{_prom_escape(route_class)}"}} {count}'
+            )
+    lines.append(
+        "# HELP ariadne_dashboard_http_request_duration_seconds Cumulative request time."
+    )
+    lines.append("# TYPE ariadne_dashboard_http_request_duration_seconds counter")
+    lines.append(
+        f"ariadne_dashboard_http_request_duration_seconds {metrics['duration_seconds_total']:.6f}"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def create_app(
+    db_path: str | Path = "arriadne.db",
+    auth_token: str | None = None,
+    enable_metrics: bool = True,
+) -> FastAPI:
     """Create and return the FastAPI application wired to an AriadneMemory instance.
 
     Args:
         db_path: Path to the SQLite database file.
+        auth_token: Optional bearer token. When set, every ``/api/*`` route
+            requires ``Authorization: Bearer <token>`` (constant-time
+            comparison). ``/health`` and ``/metrics`` stay open so uptime
+            checks and Prometheus scrapes work; put the dashboard behind a
+            proxy that guards those too if the store is sensitive.
+        enable_metrics: Expose the dependency-free ``/metrics`` endpoint
+            (Prometheus text format).
 
     Returns:
         Configured FastAPI instance ready to serve.
@@ -112,6 +233,7 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
     mem = AriadneMemory(config=config)
 
     app = FastAPI(title="Ariadne Dashboard", version="0.1.0")
+    app_state = _MetricsState()
 
     # Keep the local dashboard local; wildcard origins with credentials are
     # invalid in browsers and unsafe when the server is exposed.
@@ -122,6 +244,64 @@ def create_app(db_path: str | Path = "arriadne.db") -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _auth_and_metrics(request: Request, call_next: Any) -> Any:
+        """Bearer-token gate for /api/* plus request metrics.
+
+        The token is compared in constant time so response latency cannot
+        leak it; unmatched requests get 401 with a WWW-Authenticate header.
+        Rejections are counted too, so auth probes are visible in metrics.
+        """
+        started = _time.perf_counter()
+        route_class = "api" if request.url.path.startswith("/api") else "other"
+
+        def _finish(status: int, response: Any) -> Any:
+            app_state.record(request.method, status, route_class, _time.perf_counter() - started)
+            return response
+
+        if auth_token and request.url.path.startswith("/api"):
+            header = request.headers.get("authorization", "")
+            provided = header[7:].strip() if header.lower().startswith("bearer ") else ""
+            if not provided or not _hmac.compare_digest(provided, auth_token):
+                return _finish(
+                    401,
+                    JSONResponse(
+                        status_code=401,
+                        content={"detail": "unauthorized"},
+                        headers={"WWW-Authenticate": "Bearer"},
+                    ),
+                )
+        response = await call_next(request)
+        return _finish(response.status_code, response)
+
+    # -----------------------------------------------------------------------
+    # Health + metrics (unauthenticated by design)
+    # -----------------------------------------------------------------------
+
+    @app.get("/health")
+    def health() -> Any:
+        """Liveness probe: the store opened and is reachable."""
+        return {"status": "ok", "version": app.version}
+
+    if enable_metrics:
+
+        @app.get("/metrics")
+        def metrics_text() -> Any:
+            """Prometheus text-format metrics, rendered without dependencies."""
+            from fastapi.responses import Response as _Response
+
+            return _Response(
+                content=_render_prometheus(_jsonable(mem.stats()), app_state.snapshot()),
+                media_type="text/plain; version=0.0.4; charset=utf-8",
+            )
+
+    else:
+
+        @app.get("/metrics")
+        def metrics_disabled() -> Any:
+            """Explicit 404 so the SPA fallback doesn't swallow /metrics."""
+            return JSONResponse(status_code=404, content={"detail": "metrics disabled"})
 
     # -----------------------------------------------------------------------
     # API routes
@@ -897,7 +1077,10 @@ class _LazyApp:
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if self._app is None:
-            self._app = create_app(db_path=os.environ.get("ARIADNE_DB_PATH", "arriadne.db"))
+            self._app = create_app(
+                db_path=os.environ.get("ARIADNE_DB_PATH", "arriadne.db"),
+                auth_token=os.environ.get("ARIADNE_DASHBOARD_TOKEN") or None,
+            )
         await self._app(scope, receive, send)
 
 
