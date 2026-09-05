@@ -6,7 +6,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-
 _PLUGIN_PATH = Path(__file__).parents[1] / "plugin" / "__init__.py"
 _SPEC = importlib.util.spec_from_file_location("ariadne_test_plugin", _PLUGIN_PATH)
 assert _SPEC is not None and _SPEC.loader is not None

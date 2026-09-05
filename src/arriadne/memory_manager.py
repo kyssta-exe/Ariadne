@@ -194,6 +194,77 @@ class _FallbackCaller:
         return json.dumps({"memories": [], "relations": []})
 
 
+def openai_caller(
+    model: str = "gpt-4o-mini",
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> LLMCaller:
+    """Return an :class:`LLMCaller` backed by the OpenAI Chat Completions API.
+
+    Requires the ``openai`` package (``pip install openai``), imported lazily so
+    the rest of the module stays dependency-free. ``base_url`` accepts any
+    OpenAI-compatible endpoint (vLLM, Ollama's OpenAI shim, LM Studio, ...),
+    which keeps the whole pipeline local when pointed at a local server.
+
+    Args:
+        model: Model id, e.g. ``"gpt-4o-mini"`` or a local model name.
+        api_key: Explicit key; defaults to the ``OPENAI_API_KEY`` env var.
+        base_url: Optional OpenAI-compatible endpoint override.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError as exc:  # pragma: no cover - exercised only without openai
+        raise ImportError(
+            "openai_caller requires the 'openai' package. "
+            "Install it with: pip install openai"
+        ) from exc
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    def _call(prompt: str) -> str:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        return response.choices[0].message.content or ""
+
+    return _call
+
+
+def anthropic_caller(
+    model: str = "claude-3-5-haiku-latest",
+    *,
+    api_key: str | None = None,
+) -> LLMCaller:
+    """Return an :class:`LLMCaller` backed by the Anthropic Messages API.
+
+    Requires the ``anthropic`` package (``pip install anthropic``), imported
+    lazily. The key defaults to the ``ANTHROPIC_API_KEY`` env var.
+    """
+    try:
+        from anthropic import Anthropic
+    except ImportError as exc:  # pragma: no cover - exercised only without anthropic
+        raise ImportError(
+            "anthropic_caller requires the 'anthropic' package. "
+            "Install it with: pip install anthropic"
+        ) from exc
+
+    client = Anthropic(api_key=api_key) if api_key else Anthropic()
+
+    def _call(prompt: str) -> str:
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        return "".join(block.text for block in response.content if block.type == "text")
+
+    return _call
+
+
 def _normalise_importance(value: Any, default: float = 0.5) -> float:
     try:
         v = float(value)
@@ -334,18 +405,26 @@ class LLMMemoryManager:
         memory = self.memory
         namespace = namespace or self.default_namespace
 
-        # Find an existing fact with the same subject+attribute that is still active.
-        recall = memory.recall(f"{subject} {attribute}", k=10, namespace=namespace)
+        # Find an existing fact with the same subject+attribute that is still
+        # active. Structured metadata lookup (JSON1) is exact and cheap; the
+        # old fuzzy-recall approach could miss the prior value or match noise.
         prior_id: int | None = None
-        for r in recall:
-            meta = r.get("metadata") or {}
-            if (
-                meta.get("fact_subject") == subject
-                and meta.get("fact_attribute") == attribute
-                and not r.get("is_deleted")
-            ):
-                prior_id = r["id"]
-                break
+        find_facts = getattr(memory._db, "find_facts", None)
+        if callable(find_facts):
+            prior_rows = find_facts(subject, attribute, namespace=namespace, limit=1)
+            if prior_rows:
+                prior_id = int(prior_rows[0]["id"])
+        else:  # pragma: no cover - very old storage without find_facts
+            recall = memory.recall(f"{subject} {attribute}", k=10, namespace=namespace)
+            for r in recall:
+                meta = r.get("metadata") or {}
+                if (
+                    meta.get("fact_subject") == subject
+                    and meta.get("fact_attribute") == attribute
+                    and not r.get("is_deleted")
+                ):
+                    prior_id = r["id"]
+                    break
 
         content = f"{subject} {attribute} is {value}."
         now = time.time()
@@ -368,6 +447,17 @@ class LLMMemoryManager:
             kwargs["supersedes_id"] = prior_id
 
         result = memory.remember(**kwargs)
+
+        # KV semantics: the prior value is retired once the new one exists.
+        # The supersession link keeps history queryable via get_history, while
+        # soft-deleting keeps exactly one active value per subject.attribute.
+        if (
+            prior_id is not None
+            and result.get("status") == "created"
+            and result.get("memory_id") is not None
+        ):
+            memory.forget(prior_id, hard=False)
+
         return result
 
     # -- Turn processing -----------------------------------------------------
@@ -418,21 +508,33 @@ class LLMMemoryManager:
             if m.importance < self.min_importance:
                 summary["skipped"].append(m.content)
                 continue
-            call = memory.remember(
-                content=m.content,
-                memory_type=m.kind if m.kind != "preference" else "semantic",
-                importance=m.importance,
-                entities=m.entities or None,
-                metadata={
-                    **(m.metadata or {}),
-                    "extracted": True,
-                    "kind": m.kind,
-                    "fact_subject": m.subject,
-                    "fact_attribute": m.attribute,
-                    "fact_value": m.value,
-                },
-                namespace=ns,
-            )
+            if m.is_fact:
+                # Structured facts upsert through set_fact: a changed value
+                # supersedes the prior fact (history preserved) instead of
+                # leaving both "X is A" and "X is B" active in the store.
+                call = self.set_fact(
+                    m.subject,  # type: ignore[arg-type]
+                    m.attribute,  # type: ignore[arg-type]
+                    m.value,  # type: ignore[arg-type]
+                    importance=m.importance,
+                    namespace=ns,
+                )
+            else:
+                call = memory.remember(
+                    content=m.content,
+                    memory_type=m.kind if m.kind != "preference" else "semantic",
+                    importance=m.importance,
+                    entities=m.entities or None,
+                    metadata={
+                        **(m.metadata or {}),
+                        "extracted": True,
+                        "kind": m.kind,
+                        "fact_subject": m.subject,
+                        "fact_attribute": m.attribute,
+                        "fact_value": m.value,
+                    },
+                    namespace=ns,
+                )
             status = call.get("status")
             if status == "created" and call.get("memory_id") is not None:
                 summary["stored"].append(call["memory_id"])

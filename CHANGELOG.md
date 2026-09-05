@@ -2,6 +2,35 @@
 
 All notable changes to Ariadne will be documented in this file.
 
+## [0.13.0] - 2026-09-05
+
+### Fixed
+- **Eviction no longer destroys memories implicitly.** `evict()` previously soft-deleted ~10% of the store on *every* maintenance pass (including auto-maintenance every 50 bulk writes) regardless of size. Eviction is now capacity-driven: it only removes the lowest-priority overflow when the store exceeds `config.max_memories` (or an explicit `max_memories` argument), capped at `eviction_budget` per run. With no capacity configured (the default), eviction is a no-op — data is never destroyed without asking. Use `MemoryCurator.decay()` or set `max_memories` to bound the store.
+- **Supersession filtering in `recall()`** now checks the whole store for an active replacement (one indexed query), not just memories present in the current result window — a better-ranked newer fact now reliably hides the memory it replaced.
+- **Curator contradiction resolution** no longer re-writes the winning content (which bounced off the dedup layer and left dangling supersession chains). It links the existing newer memory onto the older one via `AriadneDB.link_supersession()` and soft-deletes the older statement. A new `allow_assistant_overwrite_user=False` guard also prevents non-user-authored content from erasing user-stated facts.
+- **`LLMMemoryManager.set_fact()`** finds the prior fact via exact structured metadata lookup (`AriadneDB.find_facts`, SQLite JSON1 with a LIKE fallback) instead of fuzzy keyword recall, and retires the prior value once the new one is written — exactly one active value per `subject.attribute`.
+
+### Added
+- **Claude Code integration** (`arriadne.integrations.claude_code`) — hook adapter that turns Claude Code into a memory-backed agent: `UserPromptSubmit` records the prompt as an episode and injects a token-budgeted block of relevant memories as `additionalContext`; `Stop` records the assistant reply and (with `--extract-with openai|anthropic`) runs autonomous fact/relation extraction over the turn. Every handler is fail-open (a broken store can never block a session). Install via `ariadne mcp --host claude-code`, which also prints the `.claude/settings.json` hooks snippet.
+- **`ariadne mcp --host <host>`** — prints ready-to-merge MCP server registration JSON for Claude Code, Claude Desktop, Cursor, VS Code, and Zed.
+- **`ariadne hook claude-code`** — runs the hook adapter as a Claude Code hook command (JSON event on stdin → JSON output on stdout, always exit 0).
+- **Dashboard bearer-token auth** — `create_app(auth_token=...)` (or `ariadne dashboard --token`, or `ARIADNE_DASHBOARD_TOKEN` for the ASGI-lazy app) requires `Authorization: Bearer <token>` on every `/api/*` route, compared in constant time. `/health` and `/metrics` stay open for uptime checks and scrapes.
+- **Dashboard `/metrics`** — Prometheus text-format endpoint rendered without dependencies: memory/entity/edge/consolidation/FAISS/db-size gauges plus request counters (auth rejections included) and cumulative request time. Disable with `enable_metrics=False`.
+- **Storage** — `AriadneDB.get_latest_episode()` for hook adapters to pair an assistant reply with its user prompt.
+- **`python-multipart` added to the `[dashboard]` extra** — the `/api/restore` upload route crashed at route registration without it, so a bare `pip install arriadne-memory[dashboard]` was broken.
+- **`httpx` added to the `[dev]` extra** — required by FastAPI's `TestClient` for the new dashboard tests.
+- **Retrieval quality knobs on `recall()` / `context_pack()`**: `mmr` (Maximal Marginal Relevance diversification, 0–1) so top-k covers distinct facets instead of k near-duplicates, and `recency_boost` (recency weighting scaled by the Ebbinghaus half-life, recorded in `score_parts` for explainability).
+- **Env & file configuration** — `AriadneConfig.from_env()` (`ARIADNE_*` variables, e.g. `ARIADNE_DB_PATH`, `ARIADNE_MAX_MEMORIES`), `AriadneConfig.from_toml()`, `from_dict()`, and `to_dict()`. Field types are coerced from annotations (PEP 604 unions incl. `int | None` handled).
+- **`ariadne doctor`** — read-only integrity report: SQLite `quick_check`, FAISS↔database vector sync, FTS coverage, orphaned edges/links/provenance, dangling supersession pointers, duplicate active hashes. Exit code 1 on failure.
+- **`ariadne feedback`** — record `approve`/`reject`/`correct` (plus `relevant`/`irrelevant`) with optional note/actor and a sensible per-action confidence delta default.
+- **Storage performance** — search paths (`fts_search`, `vector_search`, `search_vector_batch`, `hybrid_search`) fetch result rows in one bulk query instead of one query per hit (N+1 eliminated); `recall()` attaches sources, feedback, and supersession chains with three batched queries total.
+- **LLM provider callers** — `memory_manager.openai_caller()` and `anthropic_caller()` factories (lazily imported; `base_url` accepts any OpenAI-compatible local endpoint, keeping the pipeline fully local).
+- **`process_turn()` fact upserts** — extracted `subject.attribute = value` memories now route through `set_fact()`, so a changed value supersedes the old fact instead of leaving both active.
+
+### Changed
+- `AriadneDB.evict()` signature: `evict(max_memories: int | None = None)`.
+- Version bumped to 0.13.0.
+
 ## [Unreleased]
 
 ### Added

@@ -7,6 +7,7 @@ the Hermes agent memory protocol.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,57 @@ from arriadne.embeddings import Embedder, resolve_embedder
 from arriadne.storage import AriadneDB, _now
 
 logger = logging.getLogger(__name__)
+
+
+def _token_set(text: str) -> set[str]:
+    """Lowercase word set of a text, used for cheap Jaccard similarity."""
+    return set(text.lower().split())
+
+
+def _mmr_select(candidates: list[dict[str, Any]], k: int, mmr: float) -> list[dict[str, Any]]:
+    """Greedy Maximal Marginal Relevance selection over scored candidates.
+
+    Balances relevance against redundancy: each step picks the candidate
+    maximizing ``(1 - mmr) * score - mmr * max_jaccard(selected)``. With
+    ``mmr=0`` this is plain top-k; with ``mmr→1`` it strongly favors novelty.
+    Deterministic (ties broken by id), and similarity is token-set Jaccard on
+    the content, so no extra vector fetches are needed.
+    """
+    if k <= 0 or not candidates:
+        return []
+    scored = sorted(candidates, key=lambda m: (-(m.get("score", 0.0)), m.get("id", 0)))
+    token_sets = {m["id"]: _token_set(m.get("content") or "") for m in scored}
+    remaining = list(scored)
+    selected: list[dict[str, Any]] = []
+    while remaining and len(selected) < k:
+        best: dict[str, Any] | None = None
+        best_val = float("-inf")
+        for cand in remaining:
+            relevance = float(cand.get("score", 0.0))
+            if selected:
+                max_sim = max(
+                    _jaccard(token_sets[cand["id"]], token_sets[s["id"]]) for s in selected
+                )
+            else:
+                max_sim = 0.0
+            value = (1.0 - mmr) * relevance - mmr * max_sim
+            # >= keeps the earlier (higher-scored) candidate on exact ties.
+            if value >= best_val:
+                best_val = value
+                best = cand
+        if best is None:  # pragma: no cover - remaining is non-empty here
+            break
+        selected.append(best)
+        remaining.remove(best)
+    return selected
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    """Jaccard similarity between two token sets."""
+    if not a and not b:
+        return 0.0
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
 
 
 class AriadneMemory:
@@ -564,7 +616,7 @@ class AriadneMemory:
         source_id: str | None = None,
         span: str | None = None,
         confidence: float = 1.0,
-        **kwargs,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Remember a memory with explicit provenance linking to an episode."""
         with self._lock:
@@ -590,7 +642,7 @@ class AriadneMemory:
         source_id: str | None = None,
         span: str | None = None,
         confidence: float = 1.0,
-        **kwargs,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Create a new memory that supersedes an old one, preserving history."""
         with self._lock:
@@ -668,6 +720,8 @@ class AriadneMemory:
         importance_min: float | None = None,
         namespace: str | None = None,
         as_of: float | None = None,
+        mmr: float = 0.0,
+        recency_boost: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Recall memories matching a query.
 
@@ -683,6 +737,14 @@ class AriadneMemory:
             importance_min: Optional minimum importance threshold.
             namespace: Namespace to search (None = all namespaces).
             as_of: Unix timestamp for temporal point-in-time recall.
+            mmr: Maximal Marginal Relevance diversity in [0, 1]. 0 (default)
+                keeps pure relevance ranking; higher values penalize results
+                that are near-duplicates of already-selected ones, so the top
+                k covers more distinct facets of the query.
+            recency_boost: Optional recency multiplier in [0, 1]. The fused
+                score is scaled by ``1 + recency_boost * exp(-age / half_life)``
+                (age from ``event_at``/``created_at``), so fresher memories
+                float without burying strong matches.
 
         Returns:
             List of matching memory dicts with sources attached.
@@ -749,23 +811,37 @@ class AriadneMemory:
                     break
                 candidate_k *= 2
 
-            final = filtered[:k]
+            # For current recall (no as_of), hide memories that some *active*
+            # memory supersedes — checked against the whole store, not just the
+            # result window, so a better-ranked replacement still wins.
+            if as_of is None and filtered:
+                superseded_ids = self._db.get_active_superseded_ids(
+                    [m["id"] for m in filtered]
+                )
+                if superseded_ids:
+                    filtered = [m for m in filtered if m["id"] not in superseded_ids]
 
-            # For current recall (no as_of), filter out superseded memories
-            # Only keep memories that are not superseded by another active memory
-            if as_of is None:
-                superseded_ids = set()
+            if recency_boost > 0.0:
+                self._apply_recency_boost(filtered, recency_boost)
+
+            # Diversify + truncate: MMR covers distinct facets of the query;
+            # without it, take the plain top-k by score.
+            if mmr > 0.0:
+                final = _mmr_select(filtered, k, mmr)
+            else:
+                final = filtered[:k]
+
+            # Attach sources, feedback, and supersession history in bulk —
+            # one query each instead of three per result.
+            if final:
+                ids = [m["id"] for m in final]
+                sources_by_id = self._db.get_sources_for_memories(ids)
+                feedback_by_id = self._db.get_feedback_for_memories(ids)
+                chains_by_id = self._supersession_chains(ids)
                 for mem in final:
-                    supersedes_id = mem.get("supersedes_id")
-                    if supersedes_id is not None:
-                        superseded_ids.add(supersedes_id)
-                final = [m for m in final if m["id"] not in superseded_ids]
-
-            # Attach sources and feedback summary to each result
-            for mem in final:
-                mem["sources"] = self._db.get_sources_for_memory(mem["id"])
-                mem["feedback"] = self._db.get_feedback(mem["id"])
-                mem["supersession_chain"] = self._db.get_supersession_chain(mem["id"])
+                    mem["sources"] = sources_by_id.get(mem["id"], [])
+                    mem["feedback"] = feedback_by_id.get(mem["id"], [])
+                    mem["supersession_chain"] = chains_by_id.get(mem["id"], [mem])
 
             # Record access for the memories actually surfaced
             if final:
@@ -782,6 +858,52 @@ class AriadneMemory:
         except Exception as e:
             logger.error("Error in recall: %s", e)
             return []
+
+    def _apply_recency_boost(self, memories: list[dict[str, Any]], boost: float) -> None:
+        """Scale each memory's score by ``1 + boost * exp(-age / half_life)``.
+
+        Age is measured from ``event_at`` when present (the time the fact was
+        true) and ``created_at`` otherwise. The adjustment is recorded in
+        ``score_parts['recency']`` so ranking stays explainable.
+        """
+        now = _now()
+        half_life = max(float(self._config.retention_half_life), 1e-9)
+        for mem in memories:
+            base_time = mem.get("event_at") or mem.get("created_at") or now
+            recency = math.exp(-max(0.0, now - float(base_time)) / half_life)
+            factor = 1.0 + boost * recency
+            parts = mem.setdefault("score_parts", {})
+            parts["recency"] = round(recency, 6)
+            parts["recency_factor"] = round(factor, 6)
+            mem["score"] = float(mem.get("score", 0.0)) * factor
+
+    def _supersession_chains(self, memory_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Build supersession chains for many memories with batched fetches.
+
+        Each chain walks backwards via ``supersedes_id`` (newest → oldest),
+        fetching each generation in one bulk query instead of one query per
+        link. Cycles are cut by never re-visiting an id within one chain.
+        """
+        chains: dict[int, list[dict[str, Any]]] = {mid: [] for mid in memory_ids}
+        # head -> next id to fetch; visited keeps per-head history for cycles.
+        pending: dict[int, int] = {mid: mid for mid in memory_ids}
+        visited: dict[int, set[int]] = {mid: {mid} for mid in memory_ids}
+        while pending:
+            batch = self._db.get_memories_batch(list(pending.values()))
+            next_pending: dict[int, int] = {}
+            for head, wanted in pending.items():
+                mem = batch.get(wanted)
+                if mem is None:
+                    continue
+                chains[head].append(mem)
+                parent = mem.get("supersedes_id")
+                if parent is not None:
+                    parent = int(parent)
+                    if parent not in visited[head]:
+                        visited[head].add(parent)
+                        next_pending[head] = parent
+            pending = next_pending
+        return chains
 
     def get_history(self, memory_id: int) -> dict[str, Any]:
         """Get full temporal history and provenance for a memory."""
@@ -807,6 +929,8 @@ class AriadneMemory:
         per_memory_overhead: int = 8,
         include_scores: bool = False,
         namespaces: list[str] | None = None,
+        mmr: float = 0.0,
+        recency_boost: float = 0.0,
         **recall_kwargs: Any,
     ) -> str:
         """Assemble a token-budget-aware context string from recalled memories.
@@ -823,16 +947,30 @@ class AriadneMemory:
             include_scores: Prepend a relevance score to each entry.
             namespaces: Optional explicit namespace allow-list. Results from
                 those namespaces are merged and re-ranked before packing.
+            mmr: Diversity for Maximal Marginal Relevance selection in [0, 1]
+                (forwarded to recall). A small value like 0.3 reduces
+                near-duplicate lines in the packed block.
+            recency_boost: Optional recency weighting in [0, 1] (forwarded to
+                recall), so fresh facts outrank stale ones on ties.
             **recall_kwargs: Extra recall() filters (type_filter...).
         """
         limit = recall_kwargs.pop("k", 20)
         if namespaces is None:
-            results = self.recall(query, k=limit, **recall_kwargs)
+            results = self.recall(
+                query, k=limit, mmr=mmr, recency_boost=recency_boost, **recall_kwargs
+            )
         else:
             recall_kwargs.pop("namespace", None)
             by_id: dict[object, dict[str, Any]] = {}
             for namespace in dict.fromkeys(str(item) for item in namespaces):
-                for result in self.recall(query, k=limit, namespace=namespace, **recall_kwargs):
+                for result in self.recall(
+                    query,
+                    k=limit,
+                    namespace=namespace,
+                    mmr=mmr,
+                    recency_boost=recency_boost,
+                    **recall_kwargs,
+                ):
                     memory_id = result.get("id")
                     previous = by_id.get(memory_id)
                     if previous is None or result.get("score", 0.0) > previous.get("score", 0.0):

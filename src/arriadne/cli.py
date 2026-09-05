@@ -9,6 +9,7 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import sys
@@ -535,6 +536,105 @@ def cmd_purge(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Print the MCP registration JSON for a host, plus install instructions."""
+    try:
+        from arriadne.integrations.claude_code import (
+            MCP_HOSTS,
+            install_snippet,
+            mcp_host_config,
+        )
+
+        if args.host not in MCP_HOSTS:
+            print(f"Unknown host {args.host!r}. Choose one of: {', '.join(MCP_HOSTS)}", file=sys.stderr)
+            return 1
+
+        db_path = Path(args.db_path or "arriadne.db").resolve()
+        config = mcp_host_config(args.host, db_path)
+        print(f"# Ariadne MCP server registration for {args.host}")
+        print(f"# Merge into: {_host_file(args.host)}")
+        print(json.dumps(config, indent=2))
+
+        if args.host == "claude-code":
+            print(
+                "\n# Optional: memory hooks (inject recall on every prompt, "
+                "record turns). Merge into ~/.claude/settings.json:"
+            )
+            print(json.dumps(install_snippet(db_path, extract_with=args.extract_with), indent=2))
+        return 0
+    except Exception as e:
+        print(f"Error generating MCP config: {e}", file=sys.stderr)
+        return 1
+
+
+def _host_file(host: str) -> str:
+    from arriadne.integrations.claude_code import _HOSTS
+
+    return str(_HOSTS[host]["file"])
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Run a memory hook adapter as a Claude Code hook command (stdin -> stdout)."""
+    try:
+        from arriadne.integrations.claude_code import run_hook
+
+        if args.adapter != "claude-code":
+            print(f"Unknown adapter {args.adapter!r} (supported: claude-code)", file=sys.stderr)
+            return 1
+        hook_args = ["--namespace", args.namespace]
+        if args.db_path:
+            hook_args = ["--db-path", args.db_path, *hook_args]
+        return run_hook(hook_args)
+    except SystemExit as e:  # argparse inside run_hook may exit on bad flags
+        return int(e.code or 0)
+    except Exception as e:
+        # Fail-open: a hook must never break the host session.
+        print(f"ariadne hook error (ignored): {e}", file=sys.stderr)
+        return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Run read-only integrity checks over the store (ariadne doctor)."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        report = mem._db.doctor()
+        mem.close()
+
+        icon = {"pass": "✓", "warn": "!", "fail": "✗"}
+        for check in report["checks"]:
+            print(f"  [{icon[check['status']]}] {check['name']:<28} {check['detail']}")
+        summary = report["summary"]
+        print(
+            f"\n  {summary['pass']} passed, {summary['warn']} warnings, "
+            f"{summary['fail']} failures"
+        )
+        return 0 if report["ok"] else 1
+    except Exception as e:
+        print(f"Error running doctor: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """Record user/agent feedback on a memory (approve/reject/correct)."""
+    try:
+        config = AriadneConfig(db_path=args.db_path)
+        mem = AriadneMemory(config=config)
+        result = mem.feedback(
+            memory_id=args.memory_id,
+            action=args.action,
+            confidence_delta=args.delta,
+            note=args.note,
+            actor=args.actor,
+        )
+        mem.close()
+        print(f"Feedback recorded: id={result['feedback_id']} action={args.action}")
+        return 0
+    except Exception as e:
+        print(f"Error recording feedback: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     """Launch the Ariadne web dashboard.
 
@@ -545,7 +645,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         Exit code (0 for success).
     """
     try:
-        import uvicorn  # noqa: F401  — lazy import
+        import uvicorn
     except ImportError:
         print(
             "uvicorn is required for the dashboard.  "
@@ -560,7 +660,10 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         print(f"Dashboard module not available: {e}", file=sys.stderr)
         return 1
 
-    app = create_app(db_path=args.db_path)
+    app = create_app(
+        db_path=args.db_path,
+        auth_token=args.token or os.environ.get("ARIADNE_DASHBOARD_TOKEN") or None,
+    )
 
     # Auto-open browser unless --no-browser
     if not args.no_browser:
@@ -698,6 +801,63 @@ def main(argv: list[str] | None = None) -> int:
     dash_parser.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
     dash_parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
     dash_parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
+    dash_parser.add_argument(
+        "--token",
+        default=None,
+        help="Require this bearer token on /api/* routes (or set ARIADNE_DASHBOARD_TOKEN)",
+    )
+
+    # doctor
+    subparsers.add_parser(
+        "doctor",
+        help="Run read-only integrity checks (index sync, FTS coverage, orphans)",
+    )
+
+    # feedback
+    fb_parser = subparsers.add_parser(
+        "feedback", help="Record feedback on a memory (approve/reject/correct)"
+    )
+    fb_parser.add_argument("memory_id", type=int, help="Memory id to give feedback on")
+    fb_parser.add_argument(
+        "--action",
+        choices=["approve", "reject", "correct", "irrelevant", "relevant"],
+        default="approve",
+        help="Feedback action (default: approve)",
+    )
+    fb_parser.add_argument(
+        "--delta",
+        type=float,
+        default=None,
+        help="Confidence delta (default: +0.1 approve, -0.2 reject, 0 otherwise)",
+    )
+    fb_parser.add_argument("--note", help="Optional note")
+    fb_parser.add_argument("--actor", help="Optional actor label (default: cli)")
+
+    # mcp (host registration snippets)
+    mcp_parser = subparsers.add_parser(
+        "mcp", help="Print MCP server registration JSON for an agent host"
+    )
+    mcp_parser.add_argument(
+        "--host",
+        default="claude-code",
+        help="Target host: claude-code, claude-desktop, cursor, vscode, zed",
+    )
+    mcp_parser.add_argument(
+        "--extract-with",
+        choices=["openai", "anthropic"],
+        default=None,
+        help="LLM provider for autonomous extraction in the hooks snippet",
+    )
+
+    # hook (run memory hooks as a Claude Code hook command)
+    hook_parser = subparsers.add_parser(
+        "hook", help="Run a memory hook adapter (reads the hook event on stdin)"
+    )
+    hook_parser.add_argument("adapter", help="Hook adapter: claude-code")
+    hook_parser.add_argument(
+        "--db-path", default=None, help="Memory database path (overrides the global flag)"
+    )
+    hook_parser.add_argument("--namespace", default="default", help="Memory namespace")
 
     args = parser.parse_args(argv)
 
@@ -706,6 +866,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _setup_logging(args.verbose)
+
+    # Default confidence deltas per action, applied before dispatch.
+    if args.command == "feedback" and args.delta is None:
+        args.delta = {"approve": 0.1, "reject": -0.2}.get(args.action, 0.0)
+    if args.command == "feedback" and args.actor is None:
+        args.actor = "cli"
 
     match args.command:
         case "init":
@@ -736,6 +902,14 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_restore(args)
         case "dashboard":
             return cmd_dashboard(args)
+        case "doctor":
+            return cmd_doctor(args)
+        case "feedback":
+            return cmd_feedback(args)
+        case "mcp":
+            return cmd_mcp(args)
+        case "hook":
+            return cmd_hook(args)
         case _:
             parser.print_help()
             return 1

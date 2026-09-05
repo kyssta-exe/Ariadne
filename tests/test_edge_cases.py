@@ -18,7 +18,6 @@ from arriadne.dedup import ContradictionDetector, Deduplicator
 from arriadne.interface import AriadneMemory
 from arriadne.storage import AriadneDB, _fts_escape
 
-
 # ---------------------------------------------------------------------------
 # Helper: create a fresh temp db path, return config, and clean up on teardown
 # ---------------------------------------------------------------------------

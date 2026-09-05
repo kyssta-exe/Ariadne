@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, cast
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 

@@ -12,8 +12,8 @@ from arriadne import AriadneMemory
 from arriadne.curator import CurateReport, MemoryCurator
 from arriadne.memory_manager import (
     ExtractionResult,
-    _parse_extraction,
     LLMMemoryManager,
+    _parse_extraction,
 )
 
 

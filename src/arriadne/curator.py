@@ -71,6 +71,7 @@ class MemoryCurator:
         decay_ttl_seconds: float | None = 86400.0 * 30,  # 30 days
         decay_importance_threshold: float = 0.4,
         resolve_contradictions: bool = True,
+        allow_assistant_overwrite_user: bool = False,
     ) -> None:
         self.memory = memory
         self.default_namespace = default_namespace
@@ -78,6 +79,11 @@ class MemoryCurator:
         self.decay_importance_threshold = decay_importance_threshold
         # Kept private so it does not shadow the public method below.
         self._resolve_contradictions = resolve_contradictions
+        # When False (default), a contradiction pair where the older statement
+        # is user-sourced and the newer one is not (e.g. an assistant guess)
+        # is left alone instead of letting machine-authored text erase what
+        # the user explicitly said.
+        self.allow_assistant_overwrite_user = allow_assistant_overwrite_user
         self._contradiction = ContradictionDetector()
 
     # -- Decay -------------------------------------------------------------
@@ -168,7 +174,7 @@ class MemoryCurator:
             (*params, k_scan),
         ).fetchall()
 
-        mems = [
+        mems: list[dict[str, Any]] = [
             {
                 "id": int(r[0]),
                 "content": str(r[1]),
@@ -191,25 +197,47 @@ class MemoryCurator:
                 )
                 if not conflicts:
                     continue
-                # The *newer* one wins; older gets superseded and soft-deleted.
+                # The *newer* one wins; the older gets linked as superseded and
+                # soft-deleted. The newer memory is linked in place rather than
+                # re-written — re-remembering identical content would bounce off
+                # the dedup layer and leave the supersession chain dangling.
                 newer, older = (
                     (cand, other) if cand["created_at"] >= other["created_at"] else (other, cand)
                 )
-                self.memory.supersede(
-                    old_memory_id=older["id"],
-                    new_content=newer["content"],
-                    namespace=ns,
-                )
+                if not self._authority_allows(newer["id"], older["id"]):
+                    logger.debug(
+                        "Skipping contradiction %d vs %d: user-sourced fact "
+                        "protected from non-user overwrite",
+                        older["id"],
+                        newer["id"],
+                    )
+                    continue
+                linked = db.link_supersession(new_id=newer["id"], old_id=older["id"])
                 self.memory.forget(older["id"], hard=False)
                 resolved += 1
                 logger.info(
-                    "Resolved contradiction: superseded %d with %d",
+                    "Resolved contradiction: superseded %d with %d (linked=%s)",
                     older["id"],
                     newer["id"],
+                    linked,
                 )
                 break  # one resolution per candidate keeps the scan linear-ish
 
         return resolved
+
+    def _authority_allows(self, newer_id: int, older_id: int) -> bool:
+        """Guard against non-user content overwriting user-stated facts.
+
+        Returns False when the older memory carries a ``user``-authored source
+        and the newer one does not, unless the curator was constructed with
+        ``allow_assistant_overwrite_user=True``.
+        """
+        if self.allow_assistant_overwrite_user:
+            return True
+        sources = self.memory._db.get_sources_for_memories([newer_id, older_id])
+        older_is_user = any(s.get("source") == "user" for s in sources.get(older_id, []))
+        newer_is_user = any(s.get("source") == "user" for s in sources.get(newer_id, []))
+        return not (older_is_user and not newer_is_user)
 
     # -- Consolidated pass ---------------------------------------------------
 
@@ -263,7 +291,7 @@ class CuratorAddon(BaseAddon):
     def description(self) -> str:
         return "Retention, conflict-resolution, and consolidation pass over Ariadne memory."
 
-    def get_cli_commands(self):  # noqa: ANN201
+    def get_cli_commands(self) -> list[Any]:
         from arriadne.addons import CLICommand
 
         def _curate(args: Any) -> None:

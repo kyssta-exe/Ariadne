@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arriadne"
-version = "0.12.1"
+version = "0.13.0"
 description = "AI agent memory system — sub-millisecond hybrid search (FAISS vector + FTS5 keyword + RRF fusion), knowledge graph traversal, cognitive retention modeling, and auto-deduplication. Zero infrastructure."
 readme = "README.md"
 license = "MIT"
@@ -37,6 +37,7 @@ dependencies = [
 dashboard = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
+    "python-multipart>=0.0.6",
 ]
 embeddings = [
     "sentence-transformers>=2.2.0",
@@ -55,6 +56,8 @@ integrations = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "httpx>=0.24.0",
+    "python-multipart>=0.0.6",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
     "fastapi>=0.100.0",
@@ -96,6 +99,11 @@ module = [
     "sentence_transformers.*",
     "sentence_transformers",
     "arriadne.embeddings",
+    # Optional extras: absent in lint environments by design (import-guarded).
+    "tomli",
+    "openai.*",
+    "anthropic.*",
+    "langgraph.*",
 ]
 ignore_missing_imports = true
 
@@ -113,6 +121,40 @@ module = [
 # dynamic type creation + protocol subscripts in adapters
 disable_error_code = ["misc", "override", "no-any-return"]
 
+[[tool.mypy.overrides]]
+module = ["arriadne.integrations.langgraph", "arriadne.integrations.openai_agents"]
+# Import-guarded adapter modules: the wrapped SDK decorators/types only exist
+# when the optional extra is installed, so strictness degrades there.
+disable_error_code = ["misc", "valid-type", "unused-ignore", "untyped-decorator", "no-any-return"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+
+[tool.ruff.lint]
+# The ignored rules cover deliberate patterns in this codebase, documented so
+# the gate stays meaningful: everything else ruff flags is still an error.
+ignore = [
+    # Fail-open contract: CLI handlers, hook adapters, and rollback paths
+    # catch broad `Exception`, log it, and never break the host session.
+    "BLE001",
+    # Best-effort cleanup (FAISS index removal, close()) may silently no-op.
+    "S110",
+    # Dunder annotation style: simple `type | None` on __exit__ args and
+    # returning the concrete class from __enter__.
+    "PYI036",
+    "PYI034",
+    # Backup/restore filenames intentionally use local-naive timestamps.
+    "DTZ005",
+    # Config/API validation prefers ValueError over TypeError for coercions.
+    "TRY004",
+    # Read-only class-level templates and test stubs flagged as "mutable".
+    "RUF012",
+    # Slice-vs-next micro-style.
+    "RUF015",
+    # Reserved typing helper for future embedder work.
+    "PYI046",
+    # The SPA shell is served from a sync route handler; blocking reads are
+    # fine there (uvicorn runs it in the event loop but it is startup-static).
+    "ASYNC230",
+]
