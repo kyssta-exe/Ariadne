@@ -106,6 +106,47 @@ def _jaccard_similarity(a: set[str], b: set[str]) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
+# Canonical column order for memory rows; shared by every SELECT that maps
+# rows through ``_memory_from_row`` so all callers see identical dicts.
+_MEMORY_COLUMNS = (
+    "id, content, content_hash, memory_type, importance, "
+    "created_at, updated_at, accessed_at, access_count, "
+    "retention_strength, is_deleted, metadata, tags, namespace, "
+    "scope, user_id, agent_id, session_id, project_id, "
+    "event_at, valid_from, valid_to, supersedes_id, confidence"
+)
+
+
+def _memory_from_row(row: Any) -> dict[str, Any]:
+    """Map a memory row (in ``_MEMORY_COLUMNS`` order) to a memory dict."""
+    return {
+        "id": row[0],
+        "content": row[1],
+        "content_hash": row[2],
+        "memory_type": row[3],
+        "importance": row[4],
+        "created_at": row[5],
+        "updated_at": row[6],
+        "accessed_at": row[7],
+        "access_count": row[8],
+        "retention_strength": row[9],
+        "is_deleted": bool(row[10]),
+        "metadata": json.loads(row[11]) if row[11] else None,
+        "tags": json.loads(row[12]) if row[12] else [],
+        "namespace": row[13],
+        "scope": row[14],
+        "user_id": row[15],
+        "agent_id": row[16],
+        "session_id": row[17],
+        "project_id": row[18],
+        "event_at": row[19],
+        "valid_from": row[20],
+        "valid_to": row[21],
+        "supersedes_id": row[22],
+        "confidence": row[23],
+    }
+
+
 class AriadneDB:
     """Core memory database with SQLite storage and FAISS vector indexing.
 
@@ -1279,11 +1320,7 @@ class AriadneDB:
         assert self._conn is not None
         try:
             cursor = self._conn.execute(
-                """SELECT id, content, content_hash, memory_type, importance,
-                          created_at, updated_at, accessed_at, access_count,
-                          retention_strength, is_deleted, metadata, tags, namespace,
-                          scope, user_id, agent_id, session_id, project_id,
-                          event_at, valid_from, valid_to, supersedes_id, confidence
+                f"""SELECT {_MEMORY_COLUMNS}
                    FROM memories WHERE id = ?""",
                 (memory_id,),
             )
@@ -1291,35 +1328,33 @@ class AriadneDB:
             if row is None:
                 return None
 
-            return {
-                "id": row[0],
-                "content": row[1],
-                "content_hash": row[2],
-                "memory_type": row[3],
-                "importance": row[4],
-                "created_at": row[5],
-                "updated_at": row[6],
-                "accessed_at": row[7],
-                "access_count": row[8],
-                "retention_strength": row[9],
-                "is_deleted": bool(row[10]),
-                "metadata": json.loads(row[11]) if row[11] else None,
-                "tags": json.loads(row[12]) if row[12] else [],
-                "namespace": row[13],
-                "scope": row[14],
-                "user_id": row[15],
-                "agent_id": row[16],
-                "session_id": row[17],
-                "project_id": row[18],
-                "event_at": row[19],
-                "valid_from": row[20],
-                "valid_to": row[21],
-                "supersedes_id": row[22],
-                "confidence": row[23],
-            }
+            return _memory_from_row(row)
         except sqlite3.Error as e:
             logger.error("Database error getting memory %d: %s", memory_id, e)
             return None
+
+    @_synchronized
+    def get_memories_batch(self, memory_ids: list[int]) -> dict[int, dict[str, Any]]:
+        """Fetch several memories in one query.
+
+        Returns a dict keyed by memory id; ids that do not exist are simply
+        absent. Search paths use this instead of looping ``get_memory`` to
+        avoid the N+1 query pattern on every result page.
+        """
+        if not memory_ids:
+            return {}
+        assert self._conn is not None
+        unique_ids = list(dict.fromkeys(int(i) for i in memory_ids))
+        placeholders = ",".join("?" * len(unique_ids))
+        try:
+            rows = self._conn.execute(
+                f"SELECT {_MEMORY_COLUMNS} FROM memories WHERE id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+            return {int(row[0]): _memory_from_row(row) for row in rows}
+        except sqlite3.Error as e:
+            logger.error("Database error in get_memories_batch: %s", e)
+            return {}
 
     @_synchronized
     def touch_memory(self, memory_id: int) -> None:
@@ -1541,16 +1576,21 @@ class AriadneDB:
             )
             distances, indices = self._faiss_index.search(vec, requested_k)
 
+            candidates: list[tuple[float, int]] = [
+                (float(dist), int(idx))
+                for dist, idx in zip(distances[0], indices[0])
+                if idx >= 0
+            ]
+            # One bulk fetch instead of one query per candidate hit.
+            batch = self.get_memories_batch([idx for _, idx in candidates])
+
             results = []
-            for dist, idx in zip(distances[0], indices[0]):
-                if idx < 0:
-                    continue
-                # With IndexIDMap2 the returned label is the memory's own id.
-                memory = self.get_memory(int(idx))
+            for dist, idx in candidates:
+                memory = batch.get(idx)
                 if memory is not None and not memory["is_deleted"]:
                     if namespace is not None and memory.get("namespace") != namespace:
                         continue
-                    memory["score"] = float(dist)
+                    memory["score"] = dist
                     memory["search_type"] = "vector"
                     results.append(memory)
                     if len(results) >= k:
@@ -1607,16 +1647,20 @@ class AriadneDB:
 
             all_results: list[list[dict[str, Any]]] = []
             for query_idx in range(len(queries)):
+                candidates = [
+                    (float(dist), int(idx))
+                    for dist, idx in zip(distances[query_idx], indices[query_idx])
+                    if idx >= 0
+                ]
+                # One bulk fetch per query page instead of per-candidate queries.
+                batch = self.get_memories_batch([idx for _, idx in candidates])
                 results = []
-                for dist, idx in zip(distances[query_idx], indices[query_idx]):
-                    if idx < 0:
-                        continue
-                    # With IndexIDMap2 the returned label is the memory's own id.
-                    memory = self.get_memory(int(idx))
+                for dist, idx in candidates:
+                    memory = batch.get(idx)
                     if memory is not None and not memory["is_deleted"]:
                         if namespace is not None and memory.get("namespace") != namespace:
                             continue
-                        memory["score"] = float(dist)
+                        memory["score"] = dist
                         memory["search_type"] = "vector_batch"
                         results.append(memory)
                         if len(results) >= k:
@@ -1680,8 +1724,9 @@ class AriadneDB:
                     break
 
             results = []
+            batch = self.get_memories_batch([int(row[0]) for row in rows])
             for rowid, rank, score in rows:
-                memory = self.get_memory(int(rowid))
+                memory = batch.get(int(rowid))
                 if memory is not None and not memory["is_deleted"]:
                     memory["score"] = float(score)
                     memory["search_type"] = "fts"
@@ -1778,6 +1823,9 @@ class AriadneDB:
         # Multiplier maps confidence [0,1] -> [0.5, 1.0], so default (1.0) is
         # unchanged and a rejected memory (0.1) drops to ~0.55x its fused score.
         all_ids = set(fts_ranks.keys()) | set(vector_ranks.keys())
+        # One bulk fetch serves both the confidence pass and result assembly.
+        memory_batch = self.get_memories_batch(list(all_ids))
+
         fused_scores: dict[int, float] = {}
         for mid in all_ids:
             score = 0.0
@@ -1785,8 +1833,7 @@ class AriadneDB:
                 score += 1.0 / (rrf_k + fts_ranks[mid])
             if mid in vector_ranks:
                 score += 1.0 / (rrf_k + vector_ranks[mid])
-            mem = self.get_memory(mid)
-            conf = _memory_confidence(mem)
+            conf = _memory_confidence(memory_batch.get(mid))
             fused_scores[mid] = score * (0.5 + 0.5 * conf)
 
         # Sort by fused score
@@ -1794,7 +1841,7 @@ class AriadneDB:
 
         results = []
         for mid in sorted_ids:
-            memory = self.get_memory(mid)
+            memory = memory_batch.get(mid)
             if memory is not None and not memory["is_deleted"]:
                 memory["score"] = fused_scores[mid]
                 memory["search_type"] = "hybrid"
@@ -2005,24 +2052,42 @@ class AriadneDB:
         )
 
     @_synchronized
-    def evict(self) -> int:
-        """Evict low-priority memories via soft delete.
+    def evict(self, max_memories: int | None = None) -> int:
+        """Evict lowest-priority memories via soft delete, only over capacity.
 
-        Removes memories with the lowest priority scores up to
-        the configured eviction budget, then prunes the access log so it does
-        not grow without bound.
+        Eviction is *capacity-driven*: it removes just enough of the
+        lowest-priority memories to bring the store back to
+        ``max_memories`` (the argument, or ``config.max_memories`` when the
+        argument is omitted). When no capacity is configured this is a no-op —
+        Ariadne never destroys memories implicitly; use ``curator.decay()`` or
+        set ``max_memories`` to bound the store.
+
+        Also prunes the access log so it does not grow without bound.
+
+        Args:
+            max_memories: Explicit capacity for this call. ``None`` uses
+                ``config.max_memories``; if that is also unset, nothing is
+                evicted.
 
         Returns:
             Number of memories evicted.
         """
         assert self._conn is not None
         try:
-            cursor = self._conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
-            total = cursor.fetchone()[0]
-            if total == 0:
+            capacity = max_memories if max_memories is not None else self._config.max_memories
+            if capacity is None or capacity < 1:
                 return 0
 
+            cursor = self._conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
+            total = cursor.fetchone()[0]
+            overflow = total - int(capacity)
+            if overflow <= 0:
+                return 0
+
+            # Evict at most ``eviction_budget`` of the store per run so one
+            # call can never gut the memory even after a large capacity drop.
             budget = max(1, int(total * self._config.eviction_budget))
+            target = min(overflow, budget)
 
             cursor = self._conn.execute(
                 """SELECT id, importance, created_at, accessed_at,
@@ -2044,7 +2109,7 @@ class AriadneDB:
                 memories.append(mem)
 
             memories.sort(key=lambda m: m["priority"])
-            to_evict = memories[:budget]
+            to_evict = memories[:target]
 
             now = _now()
             evicted = 0
@@ -2057,7 +2122,13 @@ class AriadneDB:
 
             self._commit()
             self.prune_access_log()
-            logger.info("Evicted %d low-priority memories", evicted)
+            if evicted:
+                logger.info(
+                    "Evicted %d low-priority memories (capacity=%d, total=%d)",
+                    evicted,
+                    capacity,
+                    total,
+                )
             return evicted
 
         except sqlite3.Error as e:
@@ -2582,6 +2653,386 @@ class AriadneDB:
             }
             for r in rows
         ]
+
+    @_synchronized
+    def get_latest_episode(
+        self,
+        role: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the most recent episode, optionally filtered by role/session.
+
+        Used by hook adapters (e.g. Claude Code) to pair an assistant reply
+        with the user prompt that triggered it. Returns None when nothing
+        matches.
+        """
+        assert self._conn is not None
+        where: list[str] = []
+        params: list[Any] = []
+        if role is not None:
+            where.append("role = ?")
+            params.append(role)
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        try:
+            row = self._conn.execute(
+                f"""SELECT id, content, role, source, event_at, metadata,
+                           namespace, session_id, created_at
+                    FROM episodes {where_sql}
+                    ORDER BY id DESC LIMIT 1""",
+                params,
+            ).fetchone()
+        except sqlite3.Error as e:
+            logger.error("Error fetching latest episode: %s", e)
+            return None
+        if row is None:
+            return None
+        return {
+            "id": row[0],
+            "content": row[1],
+            "role": row[2],
+            "source": row[3],
+            "event_at": row[4],
+            "metadata": json.loads(row[5]) if row[5] else None,
+            "namespace": row[6],
+            "session_id": row[7],
+            "created_at": row[8],
+        }
+
+    @_synchronized
+    def get_sources_for_memories(self, memory_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Batch version of :meth:`get_sources_for_memory`.
+
+        Returns a dict mapping each memory id to its sources (ids with no
+        sources map to an empty list). Recall uses this to attach provenance
+        in one query instead of one query per result.
+        """
+        if not memory_ids:
+            return {}
+        assert self._conn is not None
+        unique_ids = list(dict.fromkeys(int(i) for i in memory_ids))
+        placeholders = ",".join("?" * len(unique_ids))
+        grouped: dict[int, list[dict[str, Any]]] = {mid: [] for mid in unique_ids}
+        rows = self._conn.execute(
+            f"""SELECT s.memory_id, s.id, s.episode_id, s.source, s.source_id,
+                       s.span, s.confidence, s.created_at, e.content
+                FROM sources s
+                LEFT JOIN episodes e ON e.id = s.episode_id
+                WHERE s.memory_id IN ({placeholders})
+                ORDER BY s.created_at""",
+            unique_ids,
+        ).fetchall()
+        for r in rows:
+            grouped[int(r[0])].append(
+                {
+                    "id": r[1],
+                    "episode_id": r[2],
+                    "source": r[3],
+                    "source_id": r[4],
+                    "span": r[5],
+                    "confidence": r[6],
+                    "created_at": r[7],
+                    "episode_content": r[8],
+                }
+            )
+        return grouped
+
+    @_synchronized
+    def get_feedback_for_memories(self, memory_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        """Batch version of :meth:`get_feedback`.
+
+        Returns a dict mapping each memory id to its feedback rows
+        (newest first; ids with none map to an empty list).
+        """
+        if not memory_ids:
+            return {}
+        assert self._conn is not None
+        unique_ids = list(dict.fromkeys(int(i) for i in memory_ids))
+        placeholders = ",".join("?" * len(unique_ids))
+        grouped: dict[int, list[dict[str, Any]]] = {mid: [] for mid in unique_ids}
+        rows = self._conn.execute(
+            f"""SELECT memory_id, id, action, confidence_delta, note, actor, created_at
+                FROM feedback
+                WHERE memory_id IN ({placeholders})
+                ORDER BY created_at DESC""",
+            unique_ids,
+        ).fetchall()
+        for r in rows:
+            grouped[int(r[0])].append(
+                {
+                    "id": r[1],
+                    "action": r[2],
+                    "confidence_delta": r[3],
+                    "note": r[4],
+                    "actor": r[5],
+                    "created_at": r[6],
+                }
+            )
+        return grouped
+
+    @_synchronized
+    def get_active_superseded_ids(self, memory_ids: list[int]) -> set[int]:
+        """Return the subset of ``memory_ids`` that some *active* memory supersedes.
+
+        A memory is current only if no live row claims its place via
+        ``supersedes_id``. Checking against active rows (not just rows present
+        in the result window) means a superseding memory that simply ranked
+        lower still hides the memory it replaced.
+        """
+        if not memory_ids:
+            return set()
+        assert self._conn is not None
+        unique_ids = list(dict.fromkeys(int(i) for i in memory_ids))
+        placeholders = ",".join("?" * len(unique_ids))
+        rows = self._conn.execute(
+            f"""SELECT DISTINCT supersedes_id FROM memories
+                WHERE supersedes_id IN ({placeholders}) AND is_deleted = 0""",
+            unique_ids,
+        ).fetchall()
+        return {int(r[0]) for r in rows}
+
+    @_synchronized
+    def link_supersession(self, new_id: int, old_id: int) -> bool:
+        """Point an existing memory's ``supersedes_id`` at an older memory.
+
+        This is the conflict-resolution primitive: instead of re-writing the
+        new content (which the dedup layer would reject as a duplicate), the
+        already-stored newer memory is linked onto the older one so history is
+        preserved and current recall hides the superseded row. Fails softly
+        (returns False) when either memory is missing/deleted or the newer
+        memory already supersedes something else.
+        """
+        assert self._conn is not None
+        try:
+            newer = self.get_memory(new_id)
+            older = self.get_memory(old_id)
+            if newer is None or older is None or newer["is_deleted"] or older["is_deleted"]:
+                return False
+            if newer["id"] == older["id"] or newer.get("supersedes_id") is not None:
+                return False
+            cursor = self._conn.execute(
+                "UPDATE memories SET supersedes_id = ? WHERE id = ?",
+                (old_id, new_id),
+            )
+            self._commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logger.error("Error linking supersession %d -> %d: %s", new_id, old_id, e)
+            self._conn.rollback()
+            return False
+
+    @_synchronized
+    def find_facts(
+        self,
+        subject: str,
+        attribute: str,
+        namespace: str = "default",
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Find active fact memories by their structured subject/attribute.
+
+        Facts written by ``LLMMemoryManager.set_fact`` carry
+        ``metadata.fact_subject`` / ``metadata.fact_attribute``. Lookup uses
+        SQLite's JSON1 extension when available and falls back to a LIKE scan
+        on the serialized metadata when it is not (older SQLite builds).
+        """
+        assert self._conn is not None
+        try:
+            rows = self._conn.execute(
+                """SELECT id, content, metadata, confidence, created_at
+                   FROM memories
+                   WHERE is_deleted = 0
+                     AND namespace = ?
+                     AND json_extract(metadata, '$.fact_subject') = ?
+                     AND json_extract(metadata, '$.fact_attribute') = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (namespace, subject, attribute, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # JSON1 unavailable: fall back to a substring scan. JSON key order
+            # from json.dumps is stable (insertion order), so match both keys.
+            needle = f'"fact_subject": "{subject}"'
+            needle_attr = f'"fact_attribute": "{attribute}"'
+            rows = self._conn.execute(
+                """SELECT id, content, metadata, confidence, created_at
+                   FROM memories
+                   WHERE is_deleted = 0
+                     AND namespace = ?
+                     AND metadata LIKE ?
+                     AND metadata LIKE ?
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (namespace, f"%{needle}%", f"%{needle_attr}%", limit),
+            ).fetchall()
+        except sqlite3.Error as e:
+            logger.error("Error finding facts %s.%s: %s", subject, attribute, e)
+            return []
+        return [
+            {
+                "id": r[0],
+                "content": r[1],
+                "metadata": json.loads(r[2]) if r[2] else None,
+                "confidence": r[3],
+                "created_at": r[4],
+            }
+            for r in rows
+        ]
+
+    # ── Health diagnostics (ariadne doctor) ─────────────────────────────
+
+    @_synchronized
+    def doctor(self) -> dict[str, Any]:
+        """Run read-only integrity checks over the store.
+
+        Returns a report dict with per-check ``status`` ('pass' | 'warn' |
+        'fail'), a human ``detail``, and a top-level ``ok`` flag. Used by the
+        ``ariadne doctor`` CLI command; safe to run against a live database.
+        """
+        assert self._conn is not None
+        checks: list[dict[str, Any]] = []
+
+        def _check(name: str, ok: bool, detail: str, *, warn: bool = False) -> None:
+            checks.append(
+                {
+                    "name": name,
+                    "status": ("pass" if ok else ("warn" if warn else "fail")),
+                    "detail": detail,
+                }
+            )
+
+        # 1. SQLite structural integrity.
+        try:
+            quick = self._conn.execute("PRAGMA quick_check").fetchone()[0]
+            _check("sqlite_quick_check", quick == "ok", f"PRAGMA quick_check → {quick}")
+        except sqlite3.Error as e:
+            _check("sqlite_quick_check", False, f"failed: {e}")
+
+        # 2. FAISS index vs database vector count.
+        active_with_vectors = self._conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE is_deleted = 0 AND embedding IS NOT NULL"
+        ).fetchone()[0]
+        index_count = self._faiss_index.ntotal if self._faiss_index is not None else 0
+        _check(
+            "vector_index_sync",
+            active_with_vectors == index_count,
+            f"active embedded rows={active_with_vectors}, FAISS vectors={index_count}",
+        )
+
+        # 3. FTS rows present for every active memory.
+        missing_fts = self._conn.execute(
+            """SELECT COUNT(*) FROM memories m
+               WHERE m.is_deleted = 0
+                 AND NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.rowid = m.id)"""
+        ).fetchone()[0]
+        _check(
+            "fts_coverage",
+            missing_fts == 0,
+            (f"{missing_fts} active memories missing from FTS" if missing_fts else "all indexed"),
+            warn=True,
+        )
+
+        # 4. Orphaned graph edges (endpoint entity no longer exists).
+        orphan_edges = self._conn.execute(
+            """SELECT COUNT(*) FROM edges e
+               WHERE NOT EXISTS (SELECT 1 FROM entities s WHERE s.id = e.source_id)
+                  OR NOT EXISTS (SELECT 1 FROM entities t WHERE t.id = e.target_id)"""
+        ).fetchone()[0]
+        _check(
+            "orphan_edges",
+            orphan_edges == 0,
+            (f"{orphan_edges} edges point to missing entities" if orphan_edges else "none"),
+            warn=True,
+        )
+
+        # 5. Orphaned memory-entity links.
+        orphan_links = self._conn.execute(
+            """SELECT COUNT(*) FROM memory_entities me
+               WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = me.memory_id)
+                  OR NOT EXISTS (SELECT 1 FROM entities en WHERE en.id = me.entity_id)"""
+        ).fetchone()[0]
+        _check(
+            "orphan_memory_entities",
+            orphan_links == 0,
+            (f"{orphan_links} orphaned memory-entity links" if orphan_links else "none"),
+            warn=True,
+        )
+
+        # 6. Dangling supersedes pointers (target row hard-deleted).
+        dangling_supersede = self._conn.execute(
+            """SELECT COUNT(*) FROM memories m
+               WHERE m.supersedes_id IS NOT NULL AND m.is_deleted = 0
+                 AND NOT EXISTS (SELECT 1 FROM memories o WHERE o.id = m.supersedes_id)"""
+        ).fetchone()[0]
+        _check(
+            "dangling_supersedes",
+            dangling_supersede == 0,
+            (
+                f"{dangling_supersede} memories supersede hard-deleted rows"
+                if dangling_supersede
+                else "none"
+            ),
+            warn=True,
+        )
+
+        # 7. Feedback / sources pointing at hard-deleted memories.
+        orphan_feedback = self._conn.execute(
+            """SELECT COUNT(*) FROM feedback f
+               WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = f.memory_id)"""
+        ).fetchone()[0]
+        orphan_sources = self._conn.execute(
+            """SELECT COUNT(*) FROM sources s
+               WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = s.memory_id)"""
+        ).fetchone()[0]
+        _check(
+            "orphan_provenance",
+            orphan_feedback == 0 and orphan_sources == 0,
+            f"{orphan_feedback} orphan feedback rows, {orphan_sources} orphan source rows",
+            warn=True,
+        )
+
+        # 8. Duplicate active content-hash within a namespace (should be impossible).
+        dup_hashes = self._conn.execute(
+            """SELECT COUNT(*) FROM (
+                   SELECT content_hash, namespace FROM memories
+                   WHERE is_deleted = 0
+                   GROUP BY content_hash, namespace HAVING COUNT(*) > 1
+               )"""
+        ).fetchone()[0]
+        _check(
+            "duplicate_active_hashes",
+            dup_hashes == 0,
+            (f"{dup_hashes} duplicate hash groups" if dup_hashes else "none"),
+            warn=True,
+        )
+
+        # 9. Soft-deleted recoverable rows (informational).
+        soft_deleted = self._conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE is_deleted = 1"
+        ).fetchone()[0]
+        checks.append(
+            {
+                "name": "soft_deleted_recoverable",
+                "status": "pass",
+                "detail": (
+                    f"{soft_deleted} soft-deleted rows recoverable "
+                    f"(purge window: {self._config.purge_retention_seconds}s)"
+                ),
+            }
+        )
+
+        ok = all(c["status"] != "fail" for c in checks)
+        return {
+            "ok": ok,
+            "checks": checks,
+            "summary": {
+                "pass": sum(1 for c in checks if c["status"] == "pass"),
+                "warn": sum(1 for c in checks if c["status"] == "warn"),
+                "fail": sum(1 for c in checks if c["status"] == "fail"),
+            },
+        }
 
 
 @lru_cache(maxsize=4096)

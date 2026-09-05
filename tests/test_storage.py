@@ -378,11 +378,45 @@ class TestLifecycle:
                 importance=importance,
             )
 
+        # Without a capacity configured, eviction is a no-op: Ariadne never
+        # destroys memories implicitly (the old behavior silently soft-deleted
+        # 10% of the store on every maintenance pass).
+        assert db.evict() == 0
+        cursor = db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
+        assert cursor.fetchone()[0] == 10
+
+        # Over an explicit capacity, eviction removes the overflow — capped by
+        # eviction_budget (10% of the store per run) — lowest priority first.
+        evicted = db.evict(max_memories=8)
+        assert evicted == 1
+        # Repeated runs walk the store down to the capacity.
+        while db.evict(max_memories=8):
+            pass
+        cursor = db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
+        assert cursor.fetchone()[0] == 8
+        # The two lowest-importance memories (0.0 and 0.1) are the ones gone.
+        cursor = db.conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE is_deleted = 0 AND importance < 0.15"
+        )
+        assert cursor.fetchone()[0] == 0
+
+        # At/under capacity again: nothing more is evicted.
+        assert db.evict(max_memories=8) == 0
+        assert db.evict(max_memories=20) == 0
+
+    def test_eviction_config_capacity(self, db: AriadneDB) -> None:
+        """config.max_memories drives eviction when no explicit arg is passed."""
+        db._config.max_memories = 6
+        for i in range(10):
+            db.add_memory(f"Config capacity memory {i}", importance=i / 10.0)
+        # budget caps a single run at 10% of the store (1 memory here)
         evicted = db.evict()
-        assert evicted > 0
-        # Check that some were soft-deleted
-        cursor = db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 1")
-        assert cursor.fetchone()[0] > 0
+        assert evicted == 1
+        # Repeated runs walk the store back down to the capacity.
+        while db.evict():
+            pass
+        cursor = db.conn.execute("SELECT COUNT(*) FROM memories WHERE is_deleted = 0")
+        assert cursor.fetchone()[0] == 6
 
     def test_consolidation(self, db: AriadneDB) -> None:
         # Add similar memories

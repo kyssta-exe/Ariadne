@@ -1,9 +1,19 @@
-"""Configuration for Ariadne memory system."""
+"""Configuration for Ariadne memory system.
+
+Configs can be built in Python, loaded from the environment (``ARIADNE_*``
+variables via :meth:`AriadneConfig.from_env`), or loaded from a TOML file via
+:meth:`AriadneConfig.from_toml`. The environment layer means a deployment only
+needs ``ARIADNE_DB_PATH=/data/agent.db`` instead of code changes.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import os
+from dataclasses import dataclass, field, fields
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -27,6 +37,11 @@ class AriadneConfig:
         batch_size: Batch size for bulk operations.
         wal_autocheckpoint: SQLite WAL auto-checkpoint interval in pages.
         fts_tokenizer: FTS5 tokenizer configuration.
+        max_memories: Soft capacity bound. When the store grows past this many
+            active memories, ``evict()`` removes the lowest-priority overflow.
+            ``None`` (default) disables implicit eviction entirely — data is
+            never destroyed without asking; use ``curator.decay()`` or a
+            capacity to bound the store explicitly.
     """
 
     db_path: str | Path = "arriadne.db"
@@ -55,6 +70,7 @@ class AriadneConfig:
     ivf_min_points: int = 1000  # min vectors before an explicit ivf_flat index trains
     max_access_log_per_memory: int = 50  # access_log rows kept per memory after pruning
     purge_retention_seconds: float = 604800.0  # soft-deleted rows kept recoverable for 7 days
+    max_memories: int | None = None  # soft capacity; None = never evict implicitly
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -84,6 +100,8 @@ class AriadneConfig:
             raise ValueError(
                 f"purge_retention_seconds must be >= 0, got {self.purge_retention_seconds}"
             )
+        if self.max_memories is not None and self.max_memories < 1:
+            raise ValueError(f"max_memories must be >= 1 or None, got {self.max_memories}")
         if self.max_access_log_per_memory < 1:
             raise ValueError(
                 f"max_access_log_per_memory must be >= 1, got {self.max_access_log_per_memory}"
@@ -94,3 +112,161 @@ class AriadneConfig:
             case _:
                 raise ValueError(f"Unknown faiss_type: {self.faiss_type!r}")
         self.db_path = Path(self.db_path)
+
+    # ------------------------------------------------------------------
+    # Serialization / environment loading
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the config as a plain JSON-safe dict."""
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            out[f.name] = str(value) if isinstance(value, Path) else value
+        return out
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, base: AriadneConfig | None = None) -> AriadneConfig:
+        """Build a config from a dict, ignoring unknown keys.
+
+        Unknown keys are ignored (with no error) so config files can carry
+        extra sections for other tools. Values are type-coerced from the
+        declared field annotations, so ``"384"`` works for an int field.
+        """
+        hints = cls._type_hints()
+        kwargs: dict[str, Any] = {}
+        for key, value in data.items():
+            if key not in hints:
+                continue
+            kwargs[key] = cls._coerce(key, value, hints[key])
+        if base is not None:
+            merged = base.to_dict()
+            merged.update(kwargs)
+            return cls(**merged)
+        return cls(**kwargs)
+
+    @classmethod
+    @lru_cache(maxsize=1)
+    def _type_hints(cls) -> dict[str, Any]:
+        """Resolved field annotations (cached; dataclass stores strings)."""
+        import dataclasses
+        import typing
+
+        return {
+            f.name: hint
+            for f in dataclasses.fields(cls)
+            for hint in [typing.get_type_hints(cls).get(f.name, Any)]
+        }
+
+    @staticmethod
+    def _coerce(key: str, value: Any, hint: Any) -> Any:
+        """Coerce an external value (env/TOML/JSON) to the field's type."""
+        import types as _types
+        import typing as _t
+
+        if value is None:
+            return None
+        text = str(value).strip()
+        none_like = text.lower() in {"none", "null", ""}
+        # Unwrap Optional[X] / X | None to the concrete type. PEP 604 unions
+        # (`int | None`) have origin types.UnionType, typing.Optional has
+        # origin typing.Union — both must be handled.
+        origin = _t.get_origin(hint)
+        if origin is _t.Union or origin is _types.UnionType:
+            args = [a for a in _t.get_args(hint) if a is not type(None)]
+            if none_like:
+                return None
+            if args:
+                hint = args[0]
+                origin = _t.get_origin(hint)
+        if hint is bool:
+            if isinstance(value, bool):
+                return value
+            return text.lower() in {"1", "true", "yes", "on"}
+        if origin is dict or hint is dict:
+            if isinstance(value, dict):
+                return value
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                raise ValueError(f"{key} must be a JSON object, got {value!r}") from None
+        if hint is int:
+            if none_like:
+                return None
+            return int(float(text))
+        if hint is float:
+            if none_like:
+                return None
+            return float(text)
+        if hint is Path:
+            return Path(text)
+        return text
+
+    @classmethod
+    def from_env(
+        cls,
+        prefix: str = "ARIADNE",
+        *,
+        base: AriadneConfig | None = None,
+        environ: dict[str, str] | None = None,
+    ) -> AriadneConfig:
+        """Build a config from ``<PREFIX>_<FIELD>`` environment variables.
+
+        Every dataclass field can be set, e.g. ``ARIADNE_DB_PATH``,
+        ``ARIADNE_EMBEDDING_DIM``, ``ARIADNE_MAX_MEMORIES``,
+        ``ARIADNE_RETENTION_HALF_LIFE``. Values are coerced to the field
+        type; unset variables fall back to ``base`` (or the defaults).
+        ``ARIADNE_PRIORITY_WEIGHTS`` accepts a JSON object.
+        """
+        env = os.environ if environ is None else environ
+        base = base or cls()
+        hints = cls._type_hints()
+        overrides: dict[str, Any] = {}
+        for name, hint in hints.items():
+            key = f"{prefix}_{name}".upper()
+            if key not in env:
+                continue
+            raw = env[key]
+            if name == "priority_weights":
+                try:
+                    overrides[name] = json.loads(raw)
+                except json.JSONDecodeError:
+                    raise ValueError(
+                        f"{prefix}_PRIORITY_WEIGHTS must be a JSON object, got {raw!r}"
+                    ) from None
+            else:
+                overrides[name] = cls._coerce(name, raw, hint)
+        merged = base.to_dict()
+        merged.update(overrides)
+        return cls(**merged)
+
+    @classmethod
+    def from_toml(cls, path: str | Path, *, base: AriadneConfig | None = None) -> AriadneConfig:
+        """Build a config from a TOML file.
+
+        Top-level keys map to fields; keys under an optional ``[ariadne]``
+        table are also accepted. Unknown keys are ignored, so the same file
+        can host other tools' settings.
+        """
+        try:
+            import tomllib  # Python 3.11+
+        except ImportError:  # pragma: no cover - Python 3.10
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError as exc:
+                raise ImportError(
+                    "TOML config on Python 3.10 requires 'tomli'. "
+                    "Install it with: pip install tomli"
+                ) from exc
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Config file not found: {p}")
+        with p.open("rb") as fh:
+            raw = tomllib.load(fh)
+        # Top-level scalars map to fields; an optional [ariadne] table also
+        # maps to fields and wins on collision. from_dict drops unknown keys,
+        # so other tools' tables in the same file are harmless.
+        data = dict(raw)
+        data.pop("ariadne", None)
+        data.update(raw.get("ariadne", {}))
+        return cls.from_dict(data, base=base)
