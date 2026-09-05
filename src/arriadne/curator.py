@@ -174,7 +174,7 @@ class MemoryCurator:
             (*params, k_scan),
         ).fetchall()
 
-        mems = [
+        mems: list[dict[str, Any]] = [
             {
                 "id": int(r[0]),
                 "content": str(r[1]),
@@ -291,7 +291,7 @@ class CuratorAddon(BaseAddon):
     def description(self) -> str:
         return "Retention, conflict-resolution, and consolidation pass over Ariadne memory."
 
-    def get_cli_commands(self):  # noqa: ANN201
+    def get_cli_commands(self) -> list[Any]:
         from arriadne.addons import CLICommand
 
         def _curate(args: Any) -> None:

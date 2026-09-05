@@ -22,7 +22,7 @@ def _read_html() -> str:
 
 
 @router.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
-async def dashboard_index():
+async def dashboard_index() -> HTMLResponse:
     """Serve the dashboard SPA shell."""
     return HTMLResponse(_read_html())
 

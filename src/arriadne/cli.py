@@ -570,7 +570,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 def _host_file(host: str) -> str:
     from arriadne.integrations.claude_code import _HOSTS
 
-    return _HOSTS[host]["file"]
+    return str(_HOSTS[host]["file"])
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
@@ -645,7 +645,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         Exit code (0 for success).
     """
     try:
-        import uvicorn  # noqa: F401  — lazy import
+        import uvicorn
     except ImportError:
         print(
             "uvicorn is required for the dashboard.  "

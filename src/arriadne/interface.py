@@ -616,7 +616,7 @@ class AriadneMemory:
         source_id: str | None = None,
         span: str | None = None,
         confidence: float = 1.0,
-        **kwargs,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Remember a memory with explicit provenance linking to an episode."""
         with self._lock:
@@ -642,7 +642,7 @@ class AriadneMemory:
         source_id: str | None = None,
         span: str | None = None,
         confidence: float = 1.0,
-        **kwargs,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Create a new memory that supersedes an old one, preserving history."""
         with self._lock:

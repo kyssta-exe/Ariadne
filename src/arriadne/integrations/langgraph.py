@@ -22,14 +22,14 @@ Example::
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from .. import AriadneMemory
 
 # `langgraph.store.base` may not be installed; import it lazily so the module
 # can always be imported, and only fail when the store is actually constructed.
 try:  # pragma: no cover - exercised only when langgraph is installed
-    from langgraph.store.base import BaseStore, BaseItem
+    from langgraph.store.base import BaseItem, BaseStore
 
     _LANGRAPH_AVAILABLE = True
     _BaseStore = BaseStore
@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover
     _BaseStore = object  # type: ignore[assignment,misc]
 
 
-def _ns_str(namespace: Tuple[str, ...]) -> str:
+def _ns_str(namespace: tuple[str, ...]) -> str:
     """Flatten a LangGraph namespace tuple into an Ariadne namespace string."""
     if not namespace:
         return "default"
@@ -83,13 +83,13 @@ class AriadneStore(_BaseStore):  # type: ignore[misc]
         self.memory = memory
 
     @classmethod
-    def from_memory(cls, memory: AriadneMemory) -> "AriadneStore":
+    def from_memory(cls, memory: AriadneMemory) -> AriadneStore:
         """Construct from an existing :class:`AriadneMemory`."""
         return cls(memory)
 
     # -- helpers ----------------------------------------------------------
 
-    def _ns(self, namespace: Tuple[str, ...]) -> str:
+    def _ns(self, namespace: tuple[str, ...]) -> str:
         return f"{self._NS_PREFIX}::{_ns_str(namespace)}"
 
     def _item(self, memory: dict[str, Any]) -> BaseItem:
@@ -119,10 +119,10 @@ class AriadneStore(_BaseStore):  # type: ignore[misc]
 
     def put(
         self,
-        namespace: Tuple[str, ...],
+        namespace: tuple[str, ...],
         key: str,
         value: dict[str, Any],
-        index: Optional[bool] = None,
+        index: bool | None = None,
     ) -> None:
         """Write a memory under ``key``.
 
@@ -144,17 +144,17 @@ class AriadneStore(_BaseStore):  # type: ignore[misc]
 
     async def aput(
         self,
-        namespace: Tuple[str, ...],
+        namespace: tuple[str, ...],
         key: str,
         value: dict[str, Any],
-        index: Optional[bool] = None,
+        index: bool | None = None,
     ) -> None:
         """Async variant mirroring LangGraph's ``aput``."""
         self.put(namespace, key, value, index=index)
 
     # -- read -------------------------------------------------------------
 
-    def get(self, namespace: Tuple[str, ...], key: str) -> Optional[BaseItem]:
+    def get(self, namespace: tuple[str, ...], key: str) -> BaseItem | None:
         """Return the memory stored at (namespace, key), or ``None``.
 
         Ariadne has no native (namespace, key) index, so we search the
@@ -169,20 +169,20 @@ class AriadneStore(_BaseStore):  # type: ignore[misc]
                 return self._item(r)
         return None
 
-    async def aget(self, namespace: Tuple[str, ...], key: str) -> Optional[BaseItem]:
+    async def aget(self, namespace: tuple[str, ...], key: str) -> BaseItem | None:
         """Async ``aget``."""
         return self.get(namespace, key)
 
     def search(
         self,
-        namespace_prefix: Tuple[str, ...],
-        query: Optional[str] = None,
+        namespace_prefix: tuple[str, ...],
+        query: str | None = None,
         *,
-        filter: Optional[dict[str, Any]] = None,
+        filter: dict[str, Any] | None = None,
         limit: int = 10,
         offset: int = 0,
-        max_distance: Optional[float] = None,
-    ) -> List[BaseItem]:
+        max_distance: float | None = None,
+    ) -> list[BaseItem]:
         """Search memories scoped to a LangGraph namespace prefix."""
         q = query or ""
         results = (
@@ -196,7 +196,7 @@ class AriadneStore(_BaseStore):  # type: ignore[misc]
             items = [i for i in items if _matches_filter(i.value, filter)]
         return items
 
-    def _recent(self, limit: int, offset: int, namespace: Tuple[str, ...]) -> list[dict[str, Any]]:
+    def _recent(self, limit: int, offset: int, namespace: tuple[str, ...]) -> list[dict[str, Any]]:
         """Fallback listing for when search has no query (newest first)."""
         # Ariadne has no generic "list" API; use FTS matching any word in the
         # namespace and return enough candidates. For empty queries we return []
@@ -205,14 +205,14 @@ class AriadneStore(_BaseStore):  # type: ignore[misc]
 
     async def asearch(
         self,
-        namespace_prefix: Tuple[str, ...],
-        query: Optional[str] = None,
+        namespace_prefix: tuple[str, ...],
+        query: str | None = None,
         *,
-        filter: Optional[dict[str, Any]] = None,
+        filter: dict[str, Any] | None = None,
         limit: int = 10,
         offset: int = 0,
-        max_distance: Optional[float] = None,
-    ) -> List[BaseItem]:
+        max_distance: float | None = None,
+    ) -> list[BaseItem]:
         """Async ``asearch``."""
         return self.search(
             namespace_prefix,
@@ -223,33 +223,33 @@ class AriadneStore(_BaseStore):  # type: ignore[misc]
             max_distance=max_distance,
         )
 
-    def delete(self, namespace: Tuple[str, ...], key: str) -> None:
+    def delete(self, namespace: tuple[str, ...], key: str) -> None:
         """Delete the memory at (namespace, key)."""
         found = self.get(namespace, key)
         if found is not None:
             self.memory.forget(int(found.key), hard=False)
 
-    async def adelete(self, namespace: Tuple[str, ...], key: str) -> None:
+    async def adelete(self, namespace: tuple[str, ...], key: str) -> None:
         """Async ``adelete``."""
         self.delete(namespace, key)
 
     def list_namespaces(
         self,
-        prefix: Optional[Tuple[str, ...]] = None,
+        prefix: tuple[str, ...] | None = None,
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Tuple[str, ...]]:
+    ) -> list[tuple[str, ...]]:
         """Return the distinct LangGraph namespaces currently in use."""
         return [("langgraph",)]  # single-tenant default; real listing is db-scoped
 
     async def alist_namespaces(
         self,
-        prefix: Optional[Tuple[str, ...]] = None,
+        prefix: tuple[str, ...] | None = None,
         *,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Tuple[str, ...]]:
+    ) -> list[tuple[str, ...]]:
         """Async ``alist_namespaces``."""
         return self.list_namespaces(prefix, limit=limit, offset=offset)
 
@@ -264,7 +264,7 @@ def _value_text(value: dict[str, Any]) -> str:
     return _item_to_text(value)
 
 
-def _matches_filter(value: dict[str, Any], filter: Optional[dict[str, Any]]) -> bool:
+def _matches_filter(value: dict[str, Any], filter: dict[str, Any] | None) -> bool:
     if filter is None:
         return True
     for k, expected in filter.items():

@@ -1047,7 +1047,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8765, help="Bind port")
     args = parser.parse_args()
 
-    app = create_app(db_path=args.db_path)
+    app_main = create_app(db_path=args.db_path)
 
     try:
         import uvicorn
@@ -1058,7 +1058,7 @@ if __name__ == "__main__":
         )
 
     print(f"Ariadne Dashboard running at http://{args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(app_main, host=args.host, port=args.port)
 
 
 # ---------------------------------------------------------------------------

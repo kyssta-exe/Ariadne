@@ -30,8 +30,9 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, cast
 
 from .. import AriadneMemory
 
@@ -192,9 +193,11 @@ def handle_stop(
         return {"recorded_reply": bool(reply), "extracted": False}
 
     try:
-        from ..memory_manager import LLMMemoryManager
+        from ..memory_manager import LLMCaller, LLMMemoryManager
 
-        manager = LLMMemoryManager(memory, caller=caller, default_namespace=namespace)
+        manager = LLMMemoryManager(
+            memory, caller=cast("LLMCaller | None", caller), default_namespace=namespace
+        )
         summary = manager.process_turn(
             user=user_prompt,
             assistant=reply,
@@ -354,7 +357,7 @@ def mcp_server_entry(db_path: str | Path) -> dict[str, Any]:
     ``sys.executable`` is resolved at call time so the snippet always uses the
     interpreter that has Ariadne installed.
     """
-    entry = json.loads(json.dumps(_SERVER_ENTRY))  # deep copy of the template
+    entry: dict[str, Any] = json.loads(json.dumps(_SERVER_ENTRY))  # deep copy
     entry["args"] = [a.replace("{db_path}", str(Path(db_path).resolve())) for a in entry["args"]]
     return entry
 
@@ -373,7 +376,8 @@ def mcp_host_config(host: str, db_path: str | Path) -> dict[str, Any]:
         entry = {"type": "stdio", **entry}
     if host == "zed":
         entry = {**entry, "env": {}}
-    return {spec["wrapper"]: {"ariadne": entry}}
+    wrapper = str(spec["wrapper"])
+    return {wrapper: {"ariadne": entry}}
 
 
 MCP_HOSTS: tuple[str, ...] = tuple(_HOSTS)
